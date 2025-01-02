@@ -1,36 +1,17 @@
 # react-native-audio-pro
 
-A React Native module for playing MP3 audio files from remote URLs on Android and iOS. Designed for audiobook and podcast apps, it supports background playback with lock screen and notification controls.
-
-## Table of Contents
-
-- [Features](#features)
-- [Requirements](#requirements)
-- [Installation](#installation)
-- [Platform-Specific Setup](#platform-specific-setup)
-  - [Android](#android)
-  - [iOS](#ios)
-- [Usage](#usage)
-  - [Importing the Module](#importing-the-module)
-  - [Playing Audio](#playing-audio)
-  - [Handling Events](#handling-events)
-  - [Seeking](#seeking)
-- [API Reference](#api-reference)
-  - [Methods](#methods)
-  - [Events](#events)
-  - [Enums](#enums)
-- [Types](#types)
+Play audio files from remote URLs on Android and iOS. Designed for audiobook and podcast apps, it supports background playback with lock screen and notification controls.
 
 ---
 
 ## Features
 
-- **Stream MP3 Audio**: Play MP3 audio files from remote URLs with minimal buffering for quick playback.
-- **Background Playback**: Continue playing audio even when the app is in the background.
-- **Lock Screen Controls**: Control playback from the lock screen and notification center.
-- **Event Handling**: Receive detailed playback status updates via event listeners.
-- **Seek Functionality**: Seek to specific positions in the audio track.
-- **TypeScript Support**: Fully typed for TypeScript with enums and interfaces.
+- **🎵 Stream Audio**: Quickly play audio files from remote URLs with super-fast buffering.
+- **🔊 Background Playback**: Keep the music going even when the app is in the background.
+- **🔒 Lock Screen Controls**: Play, pause, seek, or skip right from your lock screen or notification center.
+- **📢 Event Updates**: Stay in the loop with playback status updates using event listeners.
+- **⏩ Seek Anywhere**: Jump to any part of the track with easy seek options.
+- **💻 TypeScript Friendly**: Fully typed with enums and interfaces to make coding a breeze.
 
 ---
 
@@ -44,16 +25,8 @@ A React Native module for playing MP3 audio files from remote URLs on Android an
 
 ## Installation
 
-Using npm:
-
-```bash
+```zsh
 npm install react-native-audio-pro
-```
-
-Using Yarn:
-
-```bash
-yarn add react-native-audio-pro
 ```
 
 ---
@@ -87,23 +60,15 @@ yarn add react-native-audio-pro
    <!-- File: android/app/src/main/AndroidManifest.xml -->
    <manifest xmlns:android="http://schemas.android.com/apk/res/android"
        package="com.yourapp">
-
        <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
        <uses-permission android:name="android.permission.WAKE_LOCK" />
-
-       <application
-           android:name=".MainApplication"
-           android:label="@string/app_name"
-           android:icon="@mipmap/ic_launcher"
-           android:allowBackup="false">
-           <!-- ... -->
-       </application>
+       <!-- ... -->
    </manifest>
    ```
 
-3. **ProGuard Rules** (if using ProGuard):
+3. **ProGuard Rules**:
 
-   Add the following rules to your ProGuard configuration:
+   If using ProGuard add the following rules:
 
    ```proguard
    # File: android/app/proguard-rules.pro
@@ -115,42 +80,38 @@ yarn add react-native-audio-pro
 
 1. **Enable Background Modes**:
 
-   In Xcode, select your project, then go to **Signing & Capabilities**. Add **Background Modes** and check **Audio, AirPlay, and Picture in Picture**.
+  - Configure your project to enable background audio playback:
+    1. Open Xcode and select your project.
+    2. Navigate to **Signing & Capabilities**.
+    3. Add **Background Modes**.
+    4. Check the option for **Audio, AirPlay, and Picture in Picture**.
 
-2. **Swift Version**:
+2. **iOS Deployment Target**:
 
-   Ensure that your project supports Swift. If not, create an empty Swift file and a bridging header when prompted.
-
-3. **iOS Deployment Target**:
-
-   Set the deployment target to **iOS 15.0** or higher in your project settings.
+  - Set the minimum iOS version to at least iOS 15.0:
+    1. Go to your project's settings in Xcode.
+    2. Navigate to the **Deployment Info** section.
+    3. Set the **iOS Deployment Target** to **iOS 15.0** or higher.
 
 ---
 
 ## Usage
 
+See the `./example/` app!
+
 ### Importing the Module
 
 ```typescript
-// File: App.tsx
 import AudioPro, { EventNames } from 'react-native-audio-pro';
 ```
 
 ### Playing Audio
 
-```typescript
-// File: App.tsx
-import React from 'react';
-import { View, Button } from 'react-native';
-import AudioPro from 'react-native-audio-pro';
+```typescript jsx
+const App = () => {
 
-const App: React.FC = () => {
   const handlePlay = async () => {
-    try {
       await AudioPro.play('https://example.com/audio.mp3');
-    } catch (error) {
-      console.error('Error playing audio:', error);
-    }
   };
 
   return (
@@ -159,19 +120,13 @@ const App: React.FC = () => {
     </View>
   );
 };
-
-export default App;
 ```
 
 ### Handling Events
 
-```typescript
-// File: App.tsx
-import React, { useEffect } from 'react';
-import { View, Button } from 'react-native';
-import AudioPro, { EventNames } from 'react-native-audio-pro';
+```typescript jsx
+const App = () => {
 
-const App: React.FC = () => {
   useEffect(() => {
     const onPlay = () => {
       console.log('Playback started');
@@ -192,25 +147,19 @@ const App: React.FC = () => {
 
   // ... rest of the component
 };
-
-export default App;
 ```
 
 ### Seeking
 
-```typescript
-// File: App.tsx
-import React from 'react';
-import { View, Button } from 'react-native';
-import AudioPro from 'react-native-audio-pro';
+```typescript jsx
+const App = () => {
 
-const App: React.FC = () => {
   const handleSeekTo = async () => {
-    await AudioPro.seekTo(60); // Seek to 1 minute
+    await AudioPro.seekTo(60);
   };
 
   const handleSeekBy = async () => {
-    await AudioPro.seekBy(15); // Seek forward by 15 seconds
+    await AudioPro.seekBy(15);
   };
 
   return (
@@ -220,8 +169,6 @@ const App: React.FC = () => {
     </View>
   );
 };
-
-export default App;
 ```
 
 ---
@@ -230,45 +177,61 @@ export default App;
 
 ### Methods
 
-#### `play(url: string, headers?: Headers): Promise<void>`
+#### play
+
+`play(url: string, headers?: Headers): Promise<void>`
 
 Starts streaming the audio from the provided URL.
 
-- **url**: The URL of the MP3 audio file (must be HTTPS).
+- **url**: The URL of the audio file (must be HTTPS).
 - **headers**: Optional HTTP headers for authenticated streams.
 
-#### `pause(): Promise<void>`
+#### pause
+
+`pause(): Promise<void>`
 
 Pauses the audio playback.
 
-#### `resume(): Promise<void>`
+#### resume
+
+`resume(): Promise<void>`
 
 Resumes the audio playback.
 
-#### `stop(): Promise<void>`
+#### stop
+
+`stop(): Promise<void>`
 
 Stops the audio playback and releases resources.
 
-#### `seekTo(seconds: number): Promise<void>`
+#### seekTo
+
+`seekTo(seconds: number): Promise<void>`
 
 Seeks to a specific time in the audio track.
 
 - **seconds**: The position in seconds to seek to.
 
-#### `seekBy(seconds: number): Promise<void>`
+#### seekBy
+
+`seekBy(seconds: number): Promise<void>`
 
 Seeks forward or backward by a specific amount of time.
 
 - **seconds**: The number of seconds to seek by (negative values seek backward).
 
-#### `addEventListener(eventName: EventNames, listener: (...args: any[]) => void): void`
+#### addEventListener
+
+`addEventListener(eventName: EventNames, listener: (...args: any[]) => void): void`
 
 Adds an event listener for playback events.
 
 - **eventName**: The event to listen for (use `EventNames` enum).
 - **listener**: The callback function to handle the event.
 
-#### `removeEventListener(eventName: EventNames, listener: (...args: any[]) => void): void`
+#### removeEventListener
+
+`removeEventListener(eventName: EventNames, listener: (...args: any[]) => void): void`
 
 Removes a previously added event listener.
 
@@ -291,50 +254,6 @@ Use the `EventNames` enum to subscribe to the following events:
 
 ---
 
-### Enums
-
-#### `EventNames`
-
-An enum of available event names for event listeners.
-
-```typescript
-export enum EventNames {
-  ON_PLAY = 'onPlay',
-  ON_PAUSE = 'onPause',
-  ON_SKIP_TO_NEXT = 'onSkipToNext',
-  ON_SKIP_TO_PREVIOUS = 'onSkipToPrevious',
-  ON_BUFFERING = 'onBuffering',
-  ON_LOADING = 'onLoading',
-  ON_ERROR = 'onError',
-  ON_FINISHED = 'onFinished',
-  ON_DURATION_RECEIVED = 'onDurationReceived',
-  ON_SEEK = 'onSeek',
-}
-```
-
----
-
-## Types
-
-#### `Headers`
-
-Type definition for HTTP headers used in the `play` method.
-
-```typescript
-type Headers = { [key: string]: string };
-```
-
----
-
-## Additional Notes
-
-- **HTTPS Requirement**: The `play` method requires audio URLs to use HTTPS for secure streaming.
-- **Custom Headers**: Support for custom HTTP headers allows for authenticated streams.
-- **Background Playback**: Ensure that background modes are properly configured on both Android and iOS to support background playback.
-- **Event Handling**: It's recommended to remove event listeners when they are no longer needed to prevent memory leaks.
-
----
-
 ## Troubleshooting
 
 - **Playback Doesn't Start**: Check that the audio URL is correct and uses HTTPS. Also, ensure that the required permissions and capabilities are set up.
@@ -343,16 +262,14 @@ type Headers = { [key: string]: string };
 
 ---
 
-## License
-
-This project is licensed under the MIT License.
+**Note**: This library focuses on playing a single audio track at a time and does not support playlist management or queue functionality. Handle this yourself according to your app's functionality and use case.
 
 ---
 
-**Note**: This library focuses on playing a single audio track at a time and does not support playlist management or queue functionality.
+## Contributing
+
+See the [contributing guide](CONTRIBUTING.md) to learn how to contribute to the repository and the development workflow.
 
 ---
 
-Feel free to open issues or submit pull requests for bug fixes and improvements.
-
-Happy coding!
+Made with [create-react-native-library](https://github.com/callstack/react-native-builder-bob)
