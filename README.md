@@ -1,32 +1,30 @@
 # react-native-audio-pro
 
-Play audio files from remote URLs on Android and iOS. Designed for audiobook and podcast apps, it supports background playback with lock screen and notification controls.
+A lightweight audio playback library for React Native. Laser-focused on delivering reliable, high-quality audio playback for remote streams on iOS and Android. No complicated features—just simple, effective audio playback.
 
 ---
 
-## Features
+## Features 🎧
 
-- **🎵 Stream Audio**: Quickly play audio files from remote URLs with super-fast buffering.
-- **🔊 Background Playback**: Keep the music going even when the app is in the background.
-- **🔒 Lock Screen Controls**: Play, pause, seek, or skip right from your lock screen or notification center.
-- **📢 Event Updates**: Stay in the loop with playback status updates using event listeners.
-- **⏩ Seek Anywhere**: Jump to any part of the track with easy seek options.
-- **👀 Focused**: Simple single remote file audio playback. No queues, no live streams, no web support, just one job and laser focused on it.
-- **💻 TypeScript Friendly**: Fully typed with enums and interfaces to make coding a breeze.
-
+- **🔗 Stream Remote Audio**: Play audio files from URLs with quick buffering.
+- **🕶️ Background Playback**: Keep audio running when the app is minimized.
+- **🔒 Lock Screen Controls**: Support play, pause, seek, and skip directly from the lock screen or notification center.
+- **📡 Modern Native Components**: Utilizes the latest native APIs for iOS (15+) and Android (API 33+).
+- **🛠️ Simple Integration**: Minimal API with TypeScript support for clean and easy development.
+- **📊 Event Handling**: Subscribe to key playback events (e.g., play, pause, skip, seek).
 ---
 
 ## Requirements
 
-- **React Native**: 0.60 or higher
-- **Android**: Android 13 (API Level 33) or higher
-- **iOS**: iOS 15.0 or higher
+- **React Native**: 0.71+ (modern version support).
+- **Android**: API 33+ (latest audio/notification APIs).
+- **iOS**: 15.1+ (React Native platform baseline).
 
 ---
 
 ## Installation
 
-```zsh
+```bash
 npm install react-native-audio-pro
 ```
 
@@ -38,7 +36,7 @@ npm install react-native-audio-pro
 
 1. **Gradle Configuration**:
 
-   Ensure that your `build.gradle` files are set to use SDK version 33 or higher.
+   Ensure that your `build.gradle` is set to use SDK version 33 or higher.
 
    ```gradle
    // File: android/build.gradle
@@ -71,7 +69,7 @@ npm install react-native-audio-pro
 
    If using ProGuard add the following rules:
 
-   ```proguard
+   ```
    # File: android/app/proguard-rules.pro
    -keep class com.google.android.exoplayer2.** { *; }
    -dontwarn com.google.android.exoplayer2.**
