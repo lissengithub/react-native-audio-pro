@@ -1,5 +1,13 @@
-import AudioPro from './NativeAudioPro';
-
-export function multiply(a: number, b: number): number {
-  return AudioPro.multiply(a, b);
-}
+export {
+  load,
+  play,
+  pause,
+  stop,
+  addEventListener,
+  removeEventListener,
+} from './AudioPro';
+export {
+  AudioProEvent,
+  type AudioProLoadOptions,
+  AudioProErrorCode,
+} from './types';
