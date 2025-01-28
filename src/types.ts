@@ -1,3 +1,5 @@
+// src/types.ts
+
 export enum AudioProEvent {
   BUFFERING = 'BUFFERING',
   PLAYING = 'PLAYING',
@@ -24,3 +26,15 @@ export enum AudioProErrorCode {
   UNSUPPORTED_FORMAT = 'UNSUPPORTED_FORMAT',
   UNKNOWN_ERROR = 'UNKNOWN_ERROR',
 }
+
+export type EventPayloads = {
+  [AudioProEvent.BUFFERING]: { progress: number };
+  [AudioProEvent.PLAYING]: { currentTime: number; duration: number };
+  [AudioProEvent.PAUSED]: { currentTime: number };
+  [AudioProEvent.FINISHED]: {};
+  [AudioProEvent.ERROR]: { code: AudioProErrorCode; message: string };
+  [AudioProEvent.REMOTE_SEEK]: { position: number };
+  [AudioProEvent.REMOTE_SKIP_NEXT]: {};
+  [AudioProEvent.REMOTE_SKIP_PREVIOUS]: {};
+  [AudioProEvent.PROGRESS]: { currentTime: number; duration: number };
+};

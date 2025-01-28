@@ -1,5 +1,3 @@
-// src/NativeAudioPro.ts
-
 import { NativeModules, NativeEventEmitter } from 'react-native';
 import { AudioProEvent, type AudioProMediaFile } from './types';
 
