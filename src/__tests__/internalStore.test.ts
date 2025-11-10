@@ -171,4 +171,56 @@ describe('internalStore.updateFromEvent', () => {
 
 		expect(internalStore.getState().position).toBe(10);
 	});
+
+	it('ignores stale track payload when a previous track STOPPED event arrives after queuing a new track', () => {
+		const track1 = {
+			id: 'track-1',
+			url: 'https://example.com/track-1.mp3',
+			title: 'Track 1',
+			artwork: 'https://example.com/track-1.jpg',
+		} as const;
+
+		const track2 = {
+			id: 'track-2',
+			url: 'https://example.com/track-2.mp3',
+			title: 'Track 2',
+			artwork: 'https://example.com/track-2.jpg',
+		} as const;
+
+		resetStore({ trackPlaying: track2, playerState: AudioProState.LOADING });
+
+		internalStore.getState().updateFromEvent({
+			type: AudioProEventType.STATE_CHANGED,
+			track: { ...track1 },
+			payload: { state: AudioProState.STOPPED },
+		} as AudioProEvent);
+
+		expect(internalStore.getState().trackPlaying).toBe(track2);
+	});
+
+	it('adopts the next track when native emits LOADING for the new track', () => {
+		const track1 = {
+			id: 'track-1',
+			url: 'https://example.com/track-1.mp3',
+			title: 'Track 1',
+			artwork: 'https://example.com/track-1.jpg',
+		} as const;
+
+		const track2 = {
+			id: 'track-2',
+			url: 'https://example.com/track-2.mp3',
+			title: 'Track 2',
+			artwork: 'https://example.com/track-2.jpg',
+		} as const;
+
+		resetStore({ trackPlaying: track1, playerState: AudioProState.PLAYING });
+
+		internalStore.getState().updateFromEvent({
+			type: AudioProEventType.STATE_CHANGED,
+			track: { ...track2 },
+			payload: { state: AudioProState.LOADING },
+		} as AudioProEvent);
+
+		expect(internalStore.getState().trackPlaying).toMatchObject(track2);
+	});
 });

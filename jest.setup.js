@@ -54,24 +54,34 @@ const mockActions = {
 	updateFromEvent: jest.fn(),
 };
 
-jest.mock('./src/internalStore', () => {
-	const internalStore = jest.fn((selector) => selector(mockState));
-	internalStore.getState = () => ({
-		...mockState,
-		...mockActions,
+function createInternalStoreMock(modulePath) {
+	jest.mock(modulePath, () => {
+		const internalStore = jest.fn((selector) => selector(mockState));
+		internalStore.getState = () => ({
+			...mockState,
+			...mockActions,
+		});
+		internalStore.setState = jest.fn();
+		internalStore.subscribe = jest.fn();
+		return { internalStore };
 	});
-	internalStore.setState = jest.fn();
-	internalStore.subscribe = jest.fn();
-	return { internalStore };
-});
+}
 
-jest.mock('./src/emitter', () => ({
-	emitter: {
-		emit: jest.fn(),
-		addListener: jest.fn(() => ({ remove: jest.fn() })),
-	},
-	ambientEmitter: {
-		emit: jest.fn(),
-		addListener: jest.fn(() => ({ remove: jest.fn() })),
-	},
-}));
+function createEmitterMock(modulePath) {
+	jest.mock(modulePath, () => ({
+		emitter: {
+			emit: jest.fn(),
+			addListener: jest.fn(() => ({ remove: jest.fn() })),
+		},
+		ambientEmitter: {
+			emit: jest.fn(),
+			addListener: jest.fn(() => ({ remove: jest.fn() })),
+		},
+	}));
+}
+
+createInternalStoreMock('./src/internalStore');
+createInternalStoreMock('./.conductor/hong-kong/src/internalStore');
+
+createEmitterMock('./src/emitter');
+createEmitterMock('./.conductor/hong-kong/src/emitter');

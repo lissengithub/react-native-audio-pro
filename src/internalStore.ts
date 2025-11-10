@@ -31,6 +31,30 @@ export interface AudioProStore {
 	updateFromEvent: (event: AudioProEvent) => void;
 }
 
+function getTrackIdentity(track: AudioProTrack | null | undefined): string | null {
+	if (!track) {
+		return null;
+	}
+	return track.id ?? track.url ?? null;
+}
+
+function tracksMatch(a: AudioProTrack | null | undefined, b: AudioProTrack | null | undefined) {
+	const aId = getTrackIdentity(a);
+	const bId = getTrackIdentity(b);
+	return aId !== null && aId === bId;
+}
+
+function hasTrackMetadataChanged(prev: AudioProTrack, next: AudioProTrack) {
+	return (
+		prev.id !== next.id ||
+		prev.url !== next.url ||
+		prev.title !== next.title ||
+		prev.artwork !== next.artwork ||
+		prev.album !== next.album ||
+		prev.artist !== next.artist
+	);
+}
+
 export const internalStore = create<AudioProStore>((set, get) => ({
 	playerState: AudioProState.IDLE,
 	position: 0,
@@ -125,16 +149,13 @@ export const internalStore = create<AudioProStore>((set, get) => ({
 		// 5. Track loading/unloading
 		if (track) {
 			const prev = current.trackPlaying;
-			// Only update if the track object has changed
-			if (
-				!prev ||
-				track.id !== prev.id ||
-				track.url !== prev.url ||
-				track.title !== prev.title ||
-				track.artwork !== prev.artwork ||
-				track.album !== prev.album ||
-				track.artist !== prev.artist
-			) {
+			const eventSignalsTrackSwap =
+				type === AudioProEventType.STATE_CHANGED &&
+				(payload?.state === AudioProState.LOADING ||
+					payload?.state === AudioProState.PLAYING);
+			const shouldAdoptTrack = !prev || tracksMatch(prev, track) || eventSignalsTrackSwap;
+
+			if (shouldAdoptTrack && (!prev || hasTrackMetadataChanged(prev, track))) {
 				updates.trackPlaying = track;
 			}
 		} else if (
