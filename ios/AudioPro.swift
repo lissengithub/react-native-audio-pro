@@ -324,14 +324,15 @@ class AudioPro: RCTEventEmitter {
 		guard
 			let urlString = track["url"] as? String,
 			let url = URL(string: urlString),
-			let title = track["title"] as? String,
-			let artworkUrlString = track["artwork"] as? String,
-			let artworkUrl = URL(string: artworkUrlString)
+			let title = track["title"] as? String
 		else {
 			onError("Invalid track data")
 			cleanup()
 			return
 		}
+
+		let artworkUrlString = track["artwork"] as? String ?? ""
+		let artworkUrl: URL? = artworkUrlString.isEmpty ? nil : URL(string: artworkUrlString)
 
 		do {
 			let contentType = options["contentType"] as? String ?? "MUSIC"
