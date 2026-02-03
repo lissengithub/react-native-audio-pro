@@ -460,6 +460,8 @@ class AudioPro: RCTEventEmitter {
 
 		// Fetch artwork asynchronously - skip if no URL provided
 		if let artworkUrl = artworkUrl {
+			let capturedTrack = currentTrack
+
 			let artworkTimeoutSeconds: TimeInterval = 10.0
 			let config = URLSessionConfiguration.default
 			config.timeoutIntervalForRequest = artworkTimeoutSeconds
@@ -479,7 +481,14 @@ class AudioPro: RCTEventEmitter {
 			}
 
 			session.dataTask(with: request) { [weak self] data, response, error in
+				defer { session.finishTasksAndInvalidate() }
 				guard let self = self else { return }
+
+				// Skip if track changed while artwork was loading
+				guard self.currentTrack === capturedTrack else {
+					self.log("Artwork fetch completed for stale track, skipping")
+					return
+				}
 
 				if let error = error {
 					self.log("Artwork fetch failed: \(error.localizedDescription)")
