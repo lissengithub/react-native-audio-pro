@@ -416,7 +416,7 @@ class AudioPro: RCTEventEmitter {
 		nowPlayingInfo = MPNowPlayingInfoCenter.default().nowPlayingInfo ?? [:]
 		nowPlayingInfo[MPNowPlayingInfoPropertyElapsedPlaybackTime] = 0
 		nowPlayingInfo[MPNowPlayingInfoPropertyPlaybackRate] = 1.0
-		nowPlayingInfo[MPMediaItemPropertyPlaybackDuration] = item.asset.duration.seconds
+		// Duration is set asynchronously via progress events once the player item loads
 		MPNowPlayingInfoCenter.default().nowPlayingInfo = nowPlayingInfo
 
 		// Add notification observer for track completion to the new item
