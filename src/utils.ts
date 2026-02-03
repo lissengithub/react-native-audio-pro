@@ -11,8 +11,10 @@ import type { AudioProTrack } from './types';
  * @param path - The path or URL to validate.
  */
 export function validateFilePath(path: string) {
+	if (!path || !path.trim()) return;
+
 	const supportedSchemes = ['http://', 'https://', 'file://'];
-	if (!supportedSchemes.some((scheme) => path && path.startsWith(scheme))) {
+	if (!supportedSchemes.some((scheme) => path.startsWith(scheme))) {
 		console.error(
 			`[react-native-audio-pro] Invalid file path detected: ${path}. ` +
 				`Only http://, https://, and file:// schemes are recognized.`,
@@ -95,9 +97,14 @@ export function validateTrack(track: AudioProTrack): boolean {
 		return false;
 	}
 
-	// 5. Artwork URL must be a non-empty string and valid
-	if (typeof track.artwork !== 'string' || !track.artwork.trim() || !isValidUrl(track.artwork)) {
-		logDebug('Track validation failed: invalid or missing track.artwork');
+	// 5. Artwork URL is optional - if provided, must be valid
+	if (
+		track.artwork &&
+		typeof track.artwork === 'string' &&
+		track.artwork.trim() &&
+		!isValidUrl(track.artwork)
+	) {
+		logDebug('Track validation failed: invalid track.artwork');
 		return false;
 	}
 

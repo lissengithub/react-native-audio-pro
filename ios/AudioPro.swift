@@ -324,14 +324,15 @@ class AudioPro: RCTEventEmitter {
 		guard
 			let urlString = track["url"] as? String,
 			let url = URL(string: urlString),
-			let title = track["title"] as? String,
-			let artworkUrlString = track["artwork"] as? String,
-			let artworkUrl = URL(string: artworkUrlString)
+			let title = track["title"] as? String
 		else {
 			onError("Invalid track data")
 			cleanup()
 			return
 		}
+
+		let artworkUrlString = track["artwork"] as? String ?? ""
+		let artworkUrl: URL? = artworkUrlString.isEmpty ? nil : URL(string: artworkUrlString)
 
 		do {
 			let contentType = options["contentType"] as? String ?? "MUSIC"
@@ -415,7 +416,7 @@ class AudioPro: RCTEventEmitter {
 		nowPlayingInfo = MPNowPlayingInfoCenter.default().nowPlayingInfo ?? [:]
 		nowPlayingInfo[MPNowPlayingInfoPropertyElapsedPlaybackTime] = 0
 		nowPlayingInfo[MPNowPlayingInfoPropertyPlaybackRate] = 1.0
-		nowPlayingInfo[MPMediaItemPropertyPlaybackDuration] = item.asset.duration.seconds
+		// Duration is set asynchronously via progress events once the player item loads
 		MPNowPlayingInfoCenter.default().nowPlayingInfo = nowPlayingInfo
 
 		// Add notification observer for track completion to the new item
@@ -457,70 +458,57 @@ class AudioPro: RCTEventEmitter {
 			}
 		}
 
-		// Fetch artwork asynchronously and update Now Playing info
-		DispatchQueue.global().async {
-			do {
-				// Check if artwork headers are provided
-				if let headers = options["headers"] as? NSDictionary, let artworkHeaders = headers["artwork"] as? NSDictionary {
-					// Create a simple URL request with headers
-					var request = URLRequest(url: artworkUrl)
-					for (key, value) in artworkHeaders {
-						if let headerField = key as? String, let headerValue = value as? String {
-							request.setValue(headerValue, forHTTPHeaderField: headerField)
-						}
-					}
+		// Fetch artwork asynchronously - skip if no URL provided
+		if let artworkUrl = artworkUrl {
+			let capturedTrack = currentTrack
 
-					// Use a semaphore to make the async call synchronous in this background thread
-					let semaphore = DispatchSemaphore(value: 0)
-					var imageData: Data? = nil
-					var requestError: Error? = nil
+			let artworkTimeoutSeconds: TimeInterval = 10.0
+			let config = URLSessionConfiguration.default
+			config.timeoutIntervalForRequest = artworkTimeoutSeconds
+			config.timeoutIntervalForResource = artworkTimeoutSeconds
+			let session = URLSession(configuration: config)
 
-					URLSession.shared.dataTask(with: request) { (data, response, error) in
-						imageData = data
-						requestError = error
-						semaphore.signal()
-					}.resume()
+			var request = URLRequest(url: artworkUrl)
 
-					// Wait for the request to complete
-					semaphore.wait()
-
-					if let error = requestError {
-						throw error
+			// Apply artwork headers if provided
+			if let headers = options["headers"] as? NSDictionary,
+			   let artworkHeaders = headers["artwork"] as? NSDictionary {
+				for (key, value) in artworkHeaders {
+					if let headerField = key as? String, let headerValue = value as? String {
+						request.setValue(headerValue, forHTTPHeaderField: headerField)
 					}
-
-					guard let data = imageData else {
-						throw NSError(domain: "AudioPro", code: 0, userInfo: [NSLocalizedDescriptionKey: "No image data received"])
-					}
-
-					guard let image = UIImage(data: data) else {
-						throw NSError(domain: "AudioPro", code: 0, userInfo: [NSLocalizedDescriptionKey: "Invalid image data"])
-					}
-
-					let mpmArtwork = MPMediaItemArtwork(boundsSize: image.size, requestHandler: { _ in image })
-					DispatchQueue.main.async {
-						var currentInfo = MPNowPlayingInfoCenter.default().nowPlayingInfo ?? [String: Any]()
-						currentInfo[MPMediaItemPropertyArtwork] = mpmArtwork
-						MPNowPlayingInfoCenter.default().nowPlayingInfo = currentInfo
-					}
-				} else {
-					// No headers, use simple Data initialization
-					let data = try Data(contentsOf: artworkUrl)
-					guard let image = UIImage(data: data) else {
-						throw NSError(domain: "AudioPro", code: 0, userInfo: [NSLocalizedDescriptionKey: "Invalid image data"])
-					}
-					let mpmArtwork = MPMediaItemArtwork(boundsSize: image.size, requestHandler: { _ in image })
-					DispatchQueue.main.async {
-						var currentInfo = MPNowPlayingInfoCenter.default().nowPlayingInfo ?? [String: Any]()
-						currentInfo[MPMediaItemPropertyArtwork] = mpmArtwork
-						MPNowPlayingInfoCenter.default().nowPlayingInfo = currentInfo
-					}
-				}
-			} catch {
-				DispatchQueue.main.async {
-					self.onError(error.localizedDescription)
-					self.cleanup()
 				}
 			}
+
+			session.dataTask(with: request) { [weak self] data, response, error in
+				defer { session.finishTasksAndInvalidate() }
+				guard let self = self else { return }
+
+				// Skip if track changed while artwork was loading
+				guard self.currentTrack === capturedTrack else {
+					self.log("Artwork fetch completed for stale track, skipping")
+					return
+				}
+
+				if let error = error {
+					self.log("Artwork fetch failed: \(error.localizedDescription)")
+					self.emitPlaybackError("Artwork fetch failed: \(error.localizedDescription)")
+					return
+				}
+
+				guard let data = data, let image = UIImage(data: data) else {
+					self.log("Artwork fetch returned invalid data")
+					self.emitPlaybackError("Artwork fetch returned invalid image data")
+					return
+				}
+
+				let mpmArtwork = MPMediaItemArtwork(boundsSize: image.size) { _ in image }
+				DispatchQueue.main.async {
+					var currentInfo = MPNowPlayingInfoCenter.default().nowPlayingInfo ?? [String: Any]()
+					currentInfo[MPMediaItemPropertyArtwork] = mpmArtwork
+					MPNowPlayingInfoCenter.default().nowPlayingInfo = currentInfo
+				}
+			}.resume()
 		}
 	}
 

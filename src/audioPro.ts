@@ -116,7 +116,7 @@ export const AudioPro = {
 
 		// Validate URL schemes for track and artwork
 		validateFilePath(resolvedTrack.url);
-		validateFilePath(resolvedTrack.artwork);
+		if (resolvedTrack.artwork) validateFilePath(resolvedTrack.artwork);
 
 		if (!validateTrack(resolvedTrack)) {
 			const errorMessage = '[react-native-audio-pro]: Invalid track provided to play().';
