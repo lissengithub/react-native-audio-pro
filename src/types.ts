@@ -16,7 +16,7 @@ export type AudioProTrack = {
 	id: string;
 	url: string;
 	title: string;
-	artwork: AudioProArtwork;
+	artwork?: AudioProArtwork;
 	album?: string;
 	artist?: string;
 	[key: string]: unknown; // custom properties
