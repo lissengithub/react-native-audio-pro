@@ -53,6 +53,7 @@ class AudioPro: RCTEventEmitter {
 
 	private var isRateObserverAdded = false
 	private var isStatusObserverAdded = false
+	private var isTimeControlObserverAdded = false
 
 	private var currentPlaybackSpeed: Float = 1.0
 	private var currentTrack: NSDictionary?
@@ -160,12 +161,9 @@ class AudioPro: RCTEventEmitter {
 				do {
 					try AVAudioSession.sharedInstance().setActive(true, options: .notifyOthersOnDeactivation)
 
-					// Resume playback
+					// Resume playback — timeControlStatus observer will emit
+				// PLAYING once audio is actually flowing, or LOADING if rebuffering
 					player?.play()
-					startProgressTimer()
-
-					// Emit PLAYING state
-					sendPlayingStateEvent()
 
 					// Update now playing info
 					updateNowPlayingInfo(time: player?.currentTime().seconds ?? 0, rate: 1.0)
@@ -271,6 +269,10 @@ class AudioPro: RCTEventEmitter {
 			if isRateObserverAdded {
 				player.removeObserver(self, forKeyPath: "rate")
 				isRateObserverAdded = false
+			}
+			if isTimeControlObserverAdded {
+				player.removeObserver(self, forKeyPath: "timeControlStatus")
+				isTimeControlObserverAdded = false
 			}
 			if let currentItem = player.currentItem, isStatusObserverAdded {
 				currentItem.removeObserver(self, forKeyPath: "status")
@@ -410,6 +412,10 @@ class AudioPro: RCTEventEmitter {
 		player?.addObserver(self, forKeyPath: "rate", options: [.new], context: nil)
 		isRateObserverAdded = true
 
+		// Add timeControlStatus observer to detect buffering stalls
+		player?.addObserver(self, forKeyPath: "timeControlStatus", options: [.new], context: nil)
+		isTimeControlObserverAdded = true
+
 		// Set up volume to ensure it's applied before playback starts
 		player?.volume = activeVolume
 
@@ -451,10 +457,16 @@ class AudioPro: RCTEventEmitter {
 				return
 			}
 
-			if self.player?.rate != 0 && self.hasListeners {
-				// Use sendPlayingStateEvent to ensure lastEmittedState is updated
+			guard let player = self.player, self.hasListeners else { return }
+
+			// Use timeControlStatus instead of rate to avoid emitting PLAYING while buffering
+			if player.timeControlStatus == .playing {
 				self.sendPlayingStateEvent()
 				self.startProgressTimer()
+			} else if player.timeControlStatus == .waitingToPlayAtSpecifiedRate {
+				self.log("Delayed check: still buffering, emitting LOADING")
+				let info = self.getPlaybackInfo()
+				self.sendStateEvent(state: self.STATE_LOADING, position: info.position, duration: info.duration, track: info.track)
 			}
 		}
 
@@ -626,6 +638,10 @@ class AudioPro: RCTEventEmitter {
 			if isRateObserverAdded {
 				player.removeObserver(self, forKeyPath: "rate")
 				isRateObserverAdded = false
+			}
+			if isTimeControlObserverAdded {
+				player.removeObserver(self, forKeyPath: "timeControlStatus")
+				isTimeControlObserverAdded = false
 			}
 			if let currentItem = player.currentItem, isStatusObserverAdded {
 				currentItem.removeObserver(self, forKeyPath: "status")
@@ -897,20 +913,29 @@ class AudioPro: RCTEventEmitter {
 				}
 			}
 		case "rate":
-			if let newRate = change?[.newKey] as? Float {
-				if newRate == 0 {
-					if shouldBePlaying && hasListeners {
-						let info = getPlaybackInfo()
-						sendStateEvent(state: STATE_LOADING, position: info.position, duration: info.duration, track: info.track)
-						stopTimer()
-					}
-				} else {
-					if shouldBePlaying && hasListeners {
-						// Use sendPlayingStateEvent to ensure lastEmittedState is updated
-						sendPlayingStateEvent()
-						startProgressTimer()
-					}
-				}
+			// Rate observer kept for backwards compat but timeControlStatus is the
+			// primary source of truth for play/buffer/pause transitions.
+			break
+		case "timeControlStatus":
+			guard let player = player, shouldBePlaying, hasListeners else { break }
+			switch player.timeControlStatus {
+			case .paused:
+				// rate dropped to 0 while we want to be playing → loading/buffering
+				let info = getPlaybackInfo()
+				sendStateEvent(state: STATE_LOADING, position: info.position, duration: info.duration, track: info.track)
+				stopTimer()
+			case .waitingToPlayAtSpecifiedRate:
+				// AVPlayer is buffering / waiting for network
+				log("timeControlStatus: waitingToPlayAtSpecifiedRate, reason: \(String(describing: player.reasonForWaitingToPlay))")
+				let info = getPlaybackInfo()
+				sendStateEvent(state: STATE_LOADING, position: info.position, duration: info.duration, track: info.track)
+				stopTimer()
+			case .playing:
+				// Actually playing audio
+				sendPlayingStateEvent()
+				startProgressTimer()
+			@unknown default:
+				break
 			}
 		default:
 			super.observeValue(forKeyPath: keyPath, of: object, change: change, context: context)
