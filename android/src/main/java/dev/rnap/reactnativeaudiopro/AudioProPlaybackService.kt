@@ -21,7 +21,11 @@ import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
+import androidx.media3.exoplayer.upstream.DefaultLoadErrorHandlingPolicy
+import androidx.media3.exoplayer.upstream.LoadErrorHandlingPolicy
 import androidx.media3.datasource.DataSource
+import androidx.media3.datasource.HttpDataSource.HttpDataSourceException
+import androidx.media3.datasource.HttpDataSource.InvalidResponseCodeException
 import androidx.media3.exoplayer.util.EventLogger
 import androidx.media3.session.MediaConstants
 import androidx.media3.session.MediaLibraryService
@@ -210,7 +214,22 @@ open class AudioProPlaybackService : MediaLibraryService() {
 			}
 		}
 
+		val loadErrorPolicy = object : DefaultLoadErrorHandlingPolicy() {
+			override fun getRetryDelayMsFor(loadErrorInfo: LoadErrorHandlingPolicy.LoadErrorInfo): Long {
+				val cause = loadErrorInfo.exception
+				if (cause is HttpDataSourceException) {
+					val httpCode = (cause as? InvalidResponseCodeException)?.responseCode ?: 0
+					if (httpCode in 400..499 && httpCode != 408 && httpCode != 429) return C.TIME_UNSET
+				}
+				if (loadErrorInfo.errorCount <= AudioProController.maxRetries) {
+					return loadErrorInfo.errorCount * AudioProController.retryBackoffMs
+				}
+				return C.TIME_UNSET
+			}
+		}
+
 		val mediaSourceFactory = DefaultMediaSourceFactory(dataSourceFactory)
+			.setLoadErrorHandlingPolicy(loadErrorPolicy)
 
 		val loadControl = DefaultLoadControl.Builder()
 			.setBufferDurationsMs(
