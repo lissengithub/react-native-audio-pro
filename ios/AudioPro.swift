@@ -47,7 +47,7 @@ class AudioPro: RCTEventEmitter {
 	private let STATE_PAUSED = "PAUSED"
 	private let STATE_ERROR = "ERROR"
 
-	private let GENERIC_ERROR_CODE = 900
+	private static let GENERIC_ERROR_CODE = 900
 	private var shouldBePlaying = false
 	private var isRemoteCommandCenterSetup = false
 
@@ -1123,7 +1123,7 @@ class AudioPro: RCTEventEmitter {
 				return 1005
 			}
 		default:
-			return GENERIC_ERROR_CODE
+			return AudioPro.GENERIC_ERROR_CODE
 		}
 	}
 
@@ -1224,7 +1224,7 @@ class AudioPro: RCTEventEmitter {
 	 * This method is for unrecoverable player failures that require player teardown.
 	 * For non-critical errors that don't require state transition, use emitPlaybackError() instead.
 	 */
-	func onError(_ errorMessage: String, code: Int = GENERIC_ERROR_CODE) {
+	func onError(_ errorMessage: String, code: Int = AudioPro.GENERIC_ERROR_CODE) {
 		// If we're already in an error state, just log and return
 		if isInErrorState {
 			log("Already in error state, ignoring additional error: \(errorMessage)")
