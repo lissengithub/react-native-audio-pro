@@ -847,7 +847,8 @@ object AudioProController {
 			override fun run() {
 				val pos = enginerBrowser?.currentPosition ?: 0L
 				val dur = enginerBrowser?.duration ?: 0L
-				emitNotice(AudioProModule.EVENT_TYPE_PROGRESS, pos, dur, "progressTimer")
+				val buf = enginerBrowser?.bufferedPosition ?: 0L
+				emitNotice(AudioProModule.EVENT_TYPE_PROGRESS, pos, dur, buf, "progressTimer")
 				engineProgressHandler?.postDelayed(this, settingProgressIntervalMs)
 			}
 		}
@@ -960,14 +961,16 @@ object AudioProController {
 		flowLastStateEmittedTimeMs = System.currentTimeMillis()
 	}
 
-	private fun emitNotice(eventType: String, position: Long, duration: Long, reason: String = "") {
+	private fun emitNotice(eventType: String, position: Long, duration: Long, bufferedPosition: Long = 0L, reason: String = "") {
 		// Sanitize negative values
 		val sanitizedPosition = if (position < 0) 0L else position
 		val sanitizedDuration = if (duration < 0) 0L else duration
+		val sanitizedBuffered = if (bufferedPosition < 0) 0L else bufferedPosition
 
 		val payload = Arguments.createMap().apply {
 			putDouble("position", sanitizedPosition.toDouble())
 			putDouble("duration", sanitizedDuration.toDouble())
+			putDouble("bufferedPosition", sanitizedBuffered.toDouble())
 		}
 		emitEvent(eventType, activeTrack, payload, reason)
 	}
