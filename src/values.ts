@@ -76,6 +76,35 @@ export enum AudioProAmbientEventType {
 }
 
 /**
+ * Error codes for classifying playback errors
+ */
+export enum AudioProErrorCode {
+	/** Network connection failed */
+	NETWORK_DISCONNECTED = 1001,
+	/** Network connection timed out */
+	NETWORK_TIMEOUT = 1002,
+	/** HTTP server error (5xx) or retryable HTTP codes (408, 429) */
+	HTTP_SERVER_ERROR = 1003,
+	/** HTTP client error (4xx, non-retryable) */
+	HTTP_CLIENT_ERROR = 1004,
+	/** Unspecified I/O error */
+	IO_UNSPECIFIED = 1005,
+}
+
+/**
+ * Check if an error code represents a transient (retryable) error
+ */
+export function isTransientErrorCode(code?: number): boolean {
+	if (!code) return false;
+	return [
+		AudioProErrorCode.NETWORK_DISCONNECTED,
+		AudioProErrorCode.NETWORK_TIMEOUT,
+		AudioProErrorCode.HTTP_SERVER_ERROR,
+		AudioProErrorCode.IO_UNSPECIFIED,
+	].includes(code);
+}
+
+/**
  * Default skip interval in milliseconds (30 seconds)
  */
 export const DEFAULT_SKIP_INTERVAL_MS = 30000;
@@ -106,4 +135,8 @@ export const DEFAULT_CONFIG: AudioProConfigureOptions = {
 	bufferForPlaybackMs: 2_500,
 	/** Buffer duration required after rebuffer to resume playback in milliseconds (Android only) */
 	bufferForPlaybackAfterRebufferMs: 5_000,
+	/** Maximum retry attempts for transient errors */
+	maxRetries: 5,
+	/** Base backoff delay in ms, multiplied by attempt number */
+	retryBackoffMs: 1000,
 };

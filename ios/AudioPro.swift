@@ -74,11 +74,15 @@ class AudioPro: RCTEventEmitter {
 	private var pendingStartTimeMs: Double? = nil
 	private var settingSkipIntervalMs: Double = 30000.0
 
+	private var currentAsset: AVURLAsset? = nil
+	private var retryCount: Int = 0
+
 	// JS-configurable buffer/retry settings
+	// Note: iOS only uses maxBufferMs (via preferredForwardBufferDuration).
+	// minBufferMs, bufferForPlaybackMs, bufferForPlaybackAfterRebufferMs are Android-only.
 	private static var configMaxBufferMs: Double = 120_000
-	private static var configMinBufferMs: Double = 30_000
-	private static var configBufferForPlaybackMs: Double = 2_500
-	private static var configBufferForPlaybackAfterRebufferMs: Double = 5_000
+	private static var configMaxRetries: Int = 5
+	private static var configRetryBackoffMs: Double = 1000
 
 	////////////////////////////////////////////////////////////
 	// MARK: - React Native Event Emitter Overrides
@@ -242,12 +246,21 @@ class AudioPro: RCTEventEmitter {
 	}
 
 	private func sendProgressNoticeEvent() {
-		guard let player = player, let _ = player.currentItem, player.rate != 0 else { return }
+		guard let player = player, let currentItem = player.currentItem, player.rate != 0 else { return }
 		let info = getPlaybackInfo()
+
+		var bufferedPositionMs: Int = 0
+		if let timeRange = currentItem.loadedTimeRanges.last?.timeRangeValue {
+			let bufferedEnd = CMTimeGetSeconds(CMTimeRangeGetEnd(timeRange))
+			if !bufferedEnd.isNaN && !bufferedEnd.isInfinite {
+				bufferedPositionMs = Int(round(bufferedEnd * 1000))
+			}
+		}
 
 		let payload: [String: Any] = [
 			"position": info.position,
-			"duration": info.duration
+			"duration": info.duration,
+			"bufferedPosition": bufferedPositionMs
 		]
 		sendEvent(type: EVENT_TYPE_PROGRESS, track: info.track, payload: payload)
 	}
@@ -293,9 +306,9 @@ class AudioPro: RCTEventEmitter {
 	@objc(configure:)
 	func configure(_ options: NSDictionary) {
 		if let val = options["maxBufferMs"] as? Double { AudioPro.configMaxBufferMs = val }
-		if let val = options["minBufferMs"] as? Double { AudioPro.configMinBufferMs = val }
-		if let val = options["bufferForPlaybackMs"] as? Double { AudioPro.configBufferForPlaybackMs = val }
-		if let val = options["bufferForPlaybackAfterRebufferMs"] as? Double { AudioPro.configBufferForPlaybackAfterRebufferMs = val }
+		// minBufferMs, bufferForPlaybackMs, bufferForPlaybackAfterRebufferMs are Android-only (no iOS equivalent)
+		if let val = options["maxRetries"] as? Int { AudioPro.configMaxRetries = val }
+		if let val = options["retryBackoffMs"] as? Double { AudioPro.configRetryBackoffMs = val }
 	}
 
 	@objc(play:withOptions:)
@@ -365,6 +378,7 @@ class AudioPro: RCTEventEmitter {
 
 		sendStateEvent(state: STATE_LOADING, position: 0, duration: 0, track: currentTrack)
 		shouldBePlaying = autoPlay
+		self.retryCount = 0
 
 		let album = track["album"] as? String
 		let artist = track["artist"] as? String
@@ -404,10 +418,16 @@ class AudioPro: RCTEventEmitter {
 			// Create an AVAsset with the headers
 			let asset = AVURLAsset(url: url, options: ["AVURLAssetHTTPHeaderFieldsKey": headerFields])
 			item = AVPlayerItem(asset: asset)
+			self.currentAsset = asset
 		} else {
 			// No headers, use simple URL initialization
-			item = AVPlayerItem(url: url)
+			let asset = AVURLAsset(url: url)
+			item = AVPlayerItem(asset: asset)
+			self.currentAsset = asset
 		}
+
+		// Apply buffer tuning from JS config
+		item.preferredForwardBufferDuration = AudioPro.configMaxBufferMs / 1000.0
 
 		// Add observer to the new item
 		item.addObserver(self, forKeyPath: "status", options: [.new], context: nil)
@@ -421,6 +441,8 @@ class AudioPro: RCTEventEmitter {
 			// Replace the current item with the new one
 			player?.replaceCurrentItem(with: item)
 		}
+
+		player?.automaticallyWaitsToMinimizeStalling = true
 
 		// Add rate observer to the player
 		player?.addObserver(self, forKeyPath: "rate", options: [.new], context: nil)
@@ -916,7 +938,19 @@ class AudioPro: RCTEventEmitter {
 					}
 				case .failed:
 					if let error = item.error {
-						onError("Player item failed: \(error.localizedDescription)")
+						let nsError = error as NSError
+						let errorCode = mapAVErrorCode(nsError)
+
+						if isTransientAVError(nsError) && retryCount < AudioPro.configMaxRetries {
+							// Transient error: emit soft PLAYBACK_ERROR and retry
+							log("Transient error (code=\(errorCode)): \(error.localizedDescription)")
+							emitPlaybackError("Network retry \(retryCount + 1)/\(AudioPro.configMaxRetries): \(error.localizedDescription)", code: errorCode)
+							retryWithCurrentAsset()
+						} else {
+							// Fatal error or retries exhausted: full teardown
+							log("Fatal error (code=\(errorCode)): \(error.localizedDescription)")
+							onError("Player item failed: \(error.localizedDescription)", code: errorCode)
+						}
 					} else {
 						onError("Player item failed with unknown error")
 					}
@@ -948,6 +982,8 @@ class AudioPro: RCTEventEmitter {
 				// Actually playing audio
 				sendPlayingStateEvent()
 				startProgressTimer()
+				// Reset retry counter on successful playback
+				retryCount = 0
 			@unknown default:
 				break
 			}
@@ -1073,6 +1109,93 @@ class AudioPro: RCTEventEmitter {
 		updateNowPlayingInfo(time: time)
 	}
 
+	private func mapAVErrorCode(_ error: NSError) -> Int {
+		switch error.domain {
+		case NSURLErrorDomain:
+			switch error.code {
+			case NSURLErrorTimedOut:
+				return 1002
+			case NSURLErrorNetworkConnectionLost, NSURLErrorNotConnectedToInternet:
+				return 1001
+			case NSURLErrorCannotConnectToHost, NSURLErrorCannotFindHost, NSURLErrorDNSLookupFailed:
+				return 1001
+			default:
+				return 1005
+			}
+		default:
+			return GENERIC_ERROR_CODE
+		}
+	}
+
+	private func isTransientAVError(_ error: NSError) -> Bool {
+		return error.domain == NSURLErrorDomain && [
+			NSURLErrorTimedOut,
+			NSURLErrorNetworkConnectionLost,
+			NSURLErrorNotConnectedToInternet,
+			NSURLErrorCannotConnectToHost,
+			NSURLErrorCannotFindHost,
+			NSURLErrorDNSLookupFailed
+		].contains(error.code)
+	}
+
+	private func retryWithCurrentAsset() {
+		guard let asset = currentAsset, let player = player else {
+			log("Cannot retry: no asset or player available")
+			return
+		}
+
+		retryCount += 1
+
+		let delaySeconds = Double(retryCount) * AudioPro.configRetryBackoffMs / 1000.0
+		log("Retrying playback (attempt \(retryCount)/\(AudioPro.configMaxRetries)) after \(delaySeconds)s")
+
+		DispatchQueue.main.asyncAfter(deadline: .now() + delaySeconds) { [weak self] in
+			guard let self = self, let player = self.player else { return }
+
+			// Bail if a new play() call started different playback while we were waiting
+			guard asset === self.currentAsset else {
+				self.log("Retry cancelled: asset changed (new play() call)")
+				return
+			}
+
+			// Capture old item before replacement for scoped observer cleanup
+			let oldItem = player.currentItem
+
+			// Remove KVO from old item
+			if let oldItem = oldItem, self.isStatusObserverAdded {
+				oldItem.removeObserver(self, forKeyPath: "status")
+				self.isStatusObserverAdded = false
+			}
+
+			// Create fresh AVPlayerItem from same AVURLAsset (preserves custom headers)
+			let newItem = AVPlayerItem(asset: asset)
+			newItem.preferredForwardBufferDuration = AudioPro.configMaxBufferMs / 1000.0
+
+			// Add KVO to new item
+			newItem.addObserver(self, forKeyPath: "status", options: [.new], context: nil)
+			self.isStatusObserverAdded = true
+
+			// Replace item - player stays alive
+			player.replaceCurrentItem(with: newItem)
+
+			// Re-add track completion observer for new item (scoped to old item, not nil)
+			if let oldItem = oldItem {
+				NotificationCenter.default.removeObserver(self, name: .AVPlayerItemDidPlayToEndTime, object: oldItem)
+			}
+			NotificationCenter.default.addObserver(
+				self,
+				selector: #selector(self.playerItemDidPlayToEndTime(_:)),
+				name: .AVPlayerItemDidPlayToEndTime,
+				object: newItem
+			)
+
+			if self.shouldBePlaying {
+				player.play()
+				player.rate = self.currentPlaybackSpeed
+			}
+		}
+	}
+
 	/**
 	 * Emits a PLAYBACK_ERROR event without transitioning to the ERROR state.
 	 * Use this for non-critical errors that don't require player teardown.
@@ -1101,7 +1224,7 @@ class AudioPro: RCTEventEmitter {
 	 * This method is for unrecoverable player failures that require player teardown.
 	 * For non-critical errors that don't require state transition, use emitPlaybackError() instead.
 	 */
-	func onError(_ errorMessage: String) {
+	func onError(_ errorMessage: String, code: Int = GENERIC_ERROR_CODE) {
 		// If we're already in an error state, just log and return
 		if isInErrorState {
 			log("Already in error state, ignoring additional error: \(errorMessage)")
@@ -1112,7 +1235,7 @@ class AudioPro: RCTEventEmitter {
 			// First, emit PLAYBACK_ERROR event with error details
 			let errorPayload: [String: Any] = [
 				"error": errorMessage,
-				"errorCode": GENERIC_ERROR_CODE
+				"errorCode": code
 			]
 			sendEvent(type: EVENT_TYPE_PLAYBACK_ERROR, track: currentTrack, payload: errorPayload)
 		}

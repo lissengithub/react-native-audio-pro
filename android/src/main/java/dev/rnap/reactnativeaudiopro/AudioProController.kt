@@ -10,6 +10,8 @@ import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
+import androidx.media3.datasource.HttpDataSource.HttpDataSourceException
+import androidx.media3.datasource.HttpDataSource.InvalidResponseCodeException
 import androidx.media3.session.MediaBrowser
 import androidx.media3.session.MediaController
 import androidx.media3.session.SessionToken
@@ -33,6 +35,10 @@ object AudioProController {
 	var bufferMaxMs: Int = 120_000
 	var bufferForPlaybackMs: Int = 2_500
 	var bufferForPlaybackAfterRebufferMs: Int = 5_000
+
+	// JS-configurable retry settings
+	var maxRetries: Int = 5
+	var retryBackoffMs: Long = 1000
 
 	private var reactContext: ReactApplicationContext? = null
 	private lateinit var engineBrowserFuture: ListenableFuture<MediaBrowser>
@@ -89,6 +95,27 @@ object AudioProController {
 		if (options.hasKey("maxBufferMs")) bufferMaxMs = options.getInt("maxBufferMs")
 		if (options.hasKey("bufferForPlaybackMs")) bufferForPlaybackMs = options.getInt("bufferForPlaybackMs")
 		if (options.hasKey("bufferForPlaybackAfterRebufferMs")) bufferForPlaybackAfterRebufferMs = options.getInt("bufferForPlaybackAfterRebufferMs")
+		if (options.hasKey("maxRetries")) maxRetries = options.getInt("maxRetries")
+		if (options.hasKey("retryBackoffMs")) retryBackoffMs = options.getInt("retryBackoffMs").toLong()
+	}
+
+	private fun mapErrorCode(error: PlaybackException): Int {
+		return when (error.errorCode) {
+			PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED -> 1001
+			PlaybackException.ERROR_CODE_IO_DNS_FAILED -> 1001
+			PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_TIMEOUT -> 1002
+			PlaybackException.ERROR_CODE_IO_BAD_HTTP_STATUS -> {
+				val httpCode = (error.cause as? HttpDataSourceException)
+					?.let { (it as? InvalidResponseCodeException)?.responseCode } ?: 0
+				when {
+					httpCode in 500..599 -> 1003
+					httpCode == 408 || httpCode == 429 -> 1003
+					else -> 1004
+				}
+			}
+			PlaybackException.ERROR_CODE_IO_UNSPECIFIED -> 1005
+			else -> error.errorCode
+		}
 	}
 
 	private fun ensureSession() {
@@ -773,15 +800,6 @@ object AudioProController {
 				}
 			}
 
-			/**
-			 * Handles critical errors according to the contract in logic.md:
-			 * - onError() should transition to ERROR state
-			 * - onError() should emit STATE_CHANGED: ERROR and PLAYBACK_ERROR
-			 * - onError() should clear the player state just like clear()
-			 *
-			 * This method is for unrecoverable player failures that require player teardown.
-			 * For non-critical errors that don't require state transition, use emitError() directly.
-			 */
 			override fun onPlayerError(error: PlaybackException) {
 				// If we're already in an error state, just log and return
 				if (flowIsInErrorState) {
@@ -790,12 +808,13 @@ object AudioProController {
 				}
 
 				val message = error.message ?: "Unknown error"
-				// First, emit PLAYBACK_ERROR event with error details
-				emitError(message, 500, "onPlayerError(${error.errorCode})")
+				val mappedCode = mapErrorCode(error)
 
-				// Then use the shared resetInternal function to:
-				// 1. Clear the player state (like clear())
-				// 2. Emit STATE_CHANGED: ERROR
+				// Always do full teardown. LoadErrorHandlingPolicy already handles
+				// silent segment-level retries with backoff before onPlayerError fires.
+				// By this point, retries are exhausted — signal error to JS for recovery.
+				log("Player error (code=$mappedCode): $message")
+				emitError(message, mappedCode, "onPlayerError(${error.errorCode})")
 				resetInternal(AudioProModule.STATE_ERROR)
 			}
 		}
@@ -810,7 +829,8 @@ object AudioProController {
 			override fun run() {
 				val pos = enginerBrowser?.currentPosition ?: 0L
 				val dur = enginerBrowser?.duration ?: 0L
-				emitNotice(AudioProModule.EVENT_TYPE_PROGRESS, pos, dur, "progressTimer")
+				val buf = enginerBrowser?.bufferedPosition ?: 0L
+				emitNotice(AudioProModule.EVENT_TYPE_PROGRESS, pos, dur, buf, "progressTimer")
 				engineProgressHandler?.postDelayed(this, settingProgressIntervalMs)
 			}
 		}
@@ -923,14 +943,16 @@ object AudioProController {
 		flowLastStateEmittedTimeMs = System.currentTimeMillis()
 	}
 
-	private fun emitNotice(eventType: String, position: Long, duration: Long, reason: String = "") {
+	private fun emitNotice(eventType: String, position: Long, duration: Long, bufferedPosition: Long = 0L, reason: String = "") {
 		// Sanitize negative values
 		val sanitizedPosition = if (position < 0) 0L else position
 		val sanitizedDuration = if (duration < 0) 0L else duration
+		val sanitizedBuffered = if (bufferedPosition < 0) 0L else bufferedPosition
 
 		val payload = Arguments.createMap().apply {
 			putDouble("position", sanitizedPosition.toDouble())
 			putDouble("duration", sanitizedDuration.toDouble())
+			putDouble("bufferedPosition", sanitizedBuffered.toDouble())
 		}
 		emitEvent(eventType, activeTrack, payload, reason)
 	}

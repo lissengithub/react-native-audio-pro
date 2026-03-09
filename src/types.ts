@@ -46,6 +46,10 @@ export type AudioProConfigureOptions = {
 	bufferForPlaybackMs?: number;
 	/** Buffer duration required after rebuffer to resume playback in milliseconds (default: 5000) */
 	bufferForPlaybackAfterRebufferMs?: number;
+	/** Maximum number of retry attempts for transient errors (default: 5) */
+	maxRetries?: number;
+	/** Base backoff delay in ms, multiplied by attempt number (default: 1000) */
+	retryBackoffMs?: number;
 };
 
 // ==============================
@@ -76,6 +80,7 @@ export interface AudioProEvent {
 		state?: AudioProState;
 		position?: number;
 		duration?: number;
+		bufferedPosition?: number;
 		error?: string;
 		errorCode?: number;
 		speed?: number;
@@ -101,6 +106,7 @@ export interface AudioProPlaybackErrorPayload {
 export interface AudioProProgressPayload {
 	position: number;
 	duration: number;
+	bufferedPosition?: number;
 }
 
 export interface AudioProSeekCompletePayload {

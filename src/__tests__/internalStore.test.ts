@@ -13,6 +13,7 @@ type StoreSnapshot = Pick<
 	| 'playerState'
 	| 'position'
 	| 'duration'
+	| 'bufferedPosition'
 	| 'playbackSpeed'
 	| 'volume'
 	| 'debug'
@@ -26,6 +27,7 @@ const baseState: StoreSnapshot = {
 	playerState: AudioProState.IDLE,
 	position: 0,
 	duration: 0,
+	bufferedPosition: 0,
 	playbackSpeed: 1,
 	volume: 1,
 	debug: false,
@@ -116,6 +118,24 @@ describe('internalStore.updateFromEvent', () => {
 		const state = internalStore.getState();
 		expect(state.position).toBe(15);
 		expect(state.duration).toBe(30);
+	});
+
+	it('updates buffered position from progress events', () => {
+		resetStore({ position: 5, duration: 30 });
+
+		internalStore.getState().updateFromEvent({
+			type: AudioProEventType.PROGRESS,
+			track: {
+				id: 'track-1',
+				url: 'https://example.com/audio.mp3',
+				title: 'Title',
+				artwork: 'https://example.com/art.jpg',
+			},
+			payload: { position: 15, duration: 30, bufferedPosition: 45000 },
+		} as AudioProEvent);
+
+		const state = internalStore.getState();
+		expect(state.bufferedPosition).toBe(45000);
 	});
 
 	it('retains the existing track when event metadata is identical', () => {
