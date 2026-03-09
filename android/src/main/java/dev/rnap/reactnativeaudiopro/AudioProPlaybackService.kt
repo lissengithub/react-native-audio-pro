@@ -18,6 +18,7 @@ import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.DefaultDataSource
 import androidx.media3.datasource.DefaultHttpDataSource
+import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.datasource.DataSource
@@ -211,9 +212,20 @@ open class AudioProPlaybackService : MediaLibraryService() {
 
 		val mediaSourceFactory = DefaultMediaSourceFactory(dataSourceFactory)
 
+		val loadControl = DefaultLoadControl.Builder()
+			.setBufferDurationsMs(
+				AudioProController.bufferMinMs,
+				AudioProController.bufferMaxMs,
+				AudioProController.bufferForPlaybackMs,
+				AudioProController.bufferForPlaybackAfterRebufferMs,
+			)
+			.build()
+
 		player =
 			ExoPlayer.Builder(this)
 				.setMediaSourceFactory(mediaSourceFactory)
+				.setLoadControl(loadControl)
+				.setWakeMode(C.WAKE_MODE_NETWORK)
 				.setAudioAttributes(
 					AudioAttributes.Builder()
 						.setUsage(C.USAGE_MEDIA)

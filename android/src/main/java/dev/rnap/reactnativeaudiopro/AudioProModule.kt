@@ -98,6 +98,13 @@ class AudioProModule(private val reactContext: ReactApplicationContext) :
 	}
 
 	@ReactMethod
+	fun configure(options: ReadableMap) {
+		CoroutineScope(Dispatchers.Main).launch {
+			AudioProController.configure(options)
+		}
+	}
+
+	@ReactMethod
 	fun ambientPlay(options: ReadableMap) {
 		AudioProAmbientController.ambientPlay(options)
 	}

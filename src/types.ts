@@ -38,6 +38,14 @@ export type AudioProConfigureOptions = {
 	 * @deprecated use skipIntervalMs instead
 	 */
 	skipInterval?: number;
+	/** Minimum buffer duration in milliseconds (default: 30000) */
+	minBufferMs?: number;
+	/** Maximum buffer duration in milliseconds (default: 120000) */
+	maxBufferMs?: number;
+	/** Buffer duration required to start playback in milliseconds (default: 2500) */
+	bufferForPlaybackMs?: number;
+	/** Buffer duration required after rebuffer to resume playback in milliseconds (default: 5000) */
+	bufferForPlaybackAfterRebufferMs?: number;
 };
 
 // ==============================

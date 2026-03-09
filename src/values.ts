@@ -98,4 +98,12 @@ export const DEFAULT_CONFIG: AudioProConfigureOptions = {
 	showSkipControls: false,
 	/** Interval in milliseconds for skip forward/back actions */
 	skipIntervalMs: DEFAULT_SKIP_INTERVAL_MS,
+	/** Minimum buffer duration in milliseconds (Android only) */
+	minBufferMs: 30_000,
+	/** Maximum buffer duration in milliseconds (Android only) */
+	maxBufferMs: 120_000,
+	/** Buffer duration required to start playback in milliseconds (Android only) */
+	bufferForPlaybackMs: 2_500,
+	/** Buffer duration required after rebuffer to resume playback in milliseconds (Android only) */
+	bufferForPlaybackAfterRebufferMs: 5_000,
 };

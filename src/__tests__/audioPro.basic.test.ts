@@ -180,6 +180,22 @@ describe('AudioPro configuration', () => {
 		);
 	});
 
+	it('calls native configure method with merged config', () => {
+		AudioPro.configure({
+			debug: true,
+			minBufferMs: 15_000,
+			maxBufferMs: 60_000,
+		});
+
+		expect(NativeModules.AudioPro.configure).toHaveBeenCalledWith(
+			expect.objectContaining({
+				debug: true,
+				minBufferMs: 15_000,
+				maxBufferMs: 60_000,
+			}),
+		);
+	});
+
 	it('forces skip controls off when next/prev controls are enabled', () => {
 		const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
 
