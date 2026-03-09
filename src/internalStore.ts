@@ -14,6 +14,7 @@ export interface AudioProStore {
 	playerState: AudioProState;
 	position: number;
 	duration: number;
+	bufferedPosition: number;
 	playbackSpeed: number;
 	volume: number;
 	debug: boolean;
@@ -59,6 +60,7 @@ export const internalStore = create<AudioProStore>((set, get) => ({
 	playerState: AudioProState.IDLE,
 	position: 0,
 	duration: 0,
+	bufferedPosition: 0,
 	playbackSpeed: 1.0,
 	volume: normalizeVolume(1.0),
 	debug: false,
@@ -144,6 +146,12 @@ export const internalStore = create<AudioProStore>((set, get) => ({
 		}
 		if (payload?.duration !== undefined && payload.duration !== current.duration) {
 			updates.duration = payload.duration;
+		}
+		if (
+			payload?.bufferedPosition !== undefined &&
+			payload.bufferedPosition !== current.bufferedPosition
+		) {
+			updates.bufferedPosition = payload.bufferedPosition;
 		}
 
 		// 5. Track loading/unloading

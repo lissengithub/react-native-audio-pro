@@ -80,6 +80,7 @@ export interface AudioProEvent {
 		state?: AudioProState;
 		position?: number;
 		duration?: number;
+		bufferedPosition?: number;
 		error?: string;
 		errorCode?: number;
 		speed?: number;
@@ -105,6 +106,7 @@ export interface AudioProPlaybackErrorPayload {
 export interface AudioProProgressPayload {
 	position: number;
 	duration: number;
+	bufferedPosition?: number;
 }
 
 export interface AudioProSeekCompletePayload {
