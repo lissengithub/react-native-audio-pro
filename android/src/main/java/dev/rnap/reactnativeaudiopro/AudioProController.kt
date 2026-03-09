@@ -102,7 +102,6 @@ object AudioProController {
 	private fun mapErrorCode(error: PlaybackException): Int {
 		return when (error.errorCode) {
 			PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED -> 1001
-			PlaybackException.ERROR_CODE_IO_DNS_FAILED -> 1001
 			PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_TIMEOUT -> 1002
 			PlaybackException.ERROR_CODE_IO_BAD_HTTP_STATUS -> {
 				val httpCode = (error.cause as? HttpDataSourceException)
@@ -746,6 +745,7 @@ object AudioProController {
 							AudioProModule.EVENT_TYPE_TRACK_ENDED,
 							dur,
 							dur,
+							0L,
 							"onPlaybackStateChanged(STATE_ENDED)"
 						)
 					}
