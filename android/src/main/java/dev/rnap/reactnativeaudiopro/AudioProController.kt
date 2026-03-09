@@ -102,6 +102,7 @@ object AudioProController {
 	private fun mapErrorCode(error: PlaybackException): Int {
 		return when (error.errorCode) {
 			PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED -> 1001
+			PlaybackException.ERROR_CODE_IO_DNS_FAILED -> 1001
 			PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_TIMEOUT -> 1002
 			PlaybackException.ERROR_CODE_IO_BAD_HTTP_STATUS -> {
 				val httpCode = (error.cause as? HttpDataSourceException)
@@ -115,11 +116,6 @@ object AudioProController {
 			PlaybackException.ERROR_CODE_IO_UNSPECIFIED -> 1005
 			else -> error.errorCode
 		}
-	}
-
-	private fun isTransientError(error: PlaybackException): Boolean {
-		val code = mapErrorCode(error)
-		return code in listOf(1001, 1002, 1003, 1005)
 	}
 
 	private fun ensureSession() {
@@ -804,15 +800,6 @@ object AudioProController {
 				}
 			}
 
-			/**
-			 * Handles critical errors according to the contract in logic.md:
-			 * - onError() should transition to ERROR state
-			 * - onError() should emit STATE_CHANGED: ERROR and PLAYBACK_ERROR
-			 * - onError() should clear the player state just like clear()
-			 *
-			 * This method is for unrecoverable player failures that require player teardown.
-			 * For non-critical errors that don't require state transition, use emitError() directly.
-			 */
 			override fun onPlayerError(error: PlaybackException) {
 				// If we're already in an error state, just log and return
 				if (flowIsInErrorState) {
@@ -823,17 +810,12 @@ object AudioProController {
 				val message = error.message ?: "Unknown error"
 				val mappedCode = mapErrorCode(error)
 
-				if (isTransientError(error)) {
-					// Transient error: emit soft PLAYBACK_ERROR, do NOT teardown.
-					// ExoPlayer's LoadErrorHandlingPolicy will handle retries.
-					log("Transient error (code=$mappedCode): $message")
-					emitError("Network retry: $message", mappedCode, "onPlayerError(transient, ${error.errorCode})")
-				} else {
-					// Fatal error: full teardown as before
-					log("Fatal error (code=$mappedCode): $message")
-					emitError(message, mappedCode, "onPlayerError(fatal, ${error.errorCode})")
-					resetInternal(AudioProModule.STATE_ERROR)
-				}
+				// Always do full teardown. LoadErrorHandlingPolicy already handles
+				// silent segment-level retries with backoff before onPlayerError fires.
+				// By this point, retries are exhausted — signal error to JS for recovery.
+				log("Player error (code=$mappedCode): $message")
+				emitError(message, mappedCode, "onPlayerError(${error.errorCode})")
+				resetInternal(AudioProModule.STATE_ERROR)
 			}
 		}
 
