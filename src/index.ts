@@ -67,4 +67,8 @@ export {
 	AudioProContentType,
 	/** Types of ambient audio events */
 	AudioProAmbientEventType,
+	/** Error codes for classifying playback errors */
+	AudioProErrorCode,
+	/** Check if an error code represents a transient (retryable) error */
+	isTransientErrorCode,
 } from './values';

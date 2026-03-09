@@ -10,6 +10,8 @@ import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
+import androidx.media3.datasource.HttpDataSource.HttpDataSourceException
+import androidx.media3.datasource.HttpDataSource.InvalidResponseCodeException
 import androidx.media3.session.MediaBrowser
 import androidx.media3.session.MediaController
 import androidx.media3.session.SessionToken
@@ -33,6 +35,10 @@ object AudioProController {
 	var bufferMaxMs: Int = 120_000
 	var bufferForPlaybackMs: Int = 2_500
 	var bufferForPlaybackAfterRebufferMs: Int = 5_000
+
+	// JS-configurable retry settings
+	var maxRetries: Int = 5
+	var retryBackoffMs: Long = 1000
 
 	private var reactContext: ReactApplicationContext? = null
 	private lateinit var engineBrowserFuture: ListenableFuture<MediaBrowser>
@@ -89,6 +95,31 @@ object AudioProController {
 		if (options.hasKey("maxBufferMs")) bufferMaxMs = options.getInt("maxBufferMs")
 		if (options.hasKey("bufferForPlaybackMs")) bufferForPlaybackMs = options.getInt("bufferForPlaybackMs")
 		if (options.hasKey("bufferForPlaybackAfterRebufferMs")) bufferForPlaybackAfterRebufferMs = options.getInt("bufferForPlaybackAfterRebufferMs")
+		if (options.hasKey("maxRetries")) maxRetries = options.getInt("maxRetries")
+		if (options.hasKey("retryBackoffMs")) retryBackoffMs = options.getInt("retryBackoffMs").toLong()
+	}
+
+	private fun mapErrorCode(error: PlaybackException): Int {
+		return when (error.errorCode) {
+			PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED -> 1001
+			PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_TIMEOUT -> 1002
+			PlaybackException.ERROR_CODE_IO_BAD_HTTP_STATUS -> {
+				val httpCode = (error.cause as? HttpDataSourceException)
+					?.let { (it as? InvalidResponseCodeException)?.responseCode } ?: 0
+				when {
+					httpCode in 500..599 -> 1003
+					httpCode == 408 || httpCode == 429 -> 1003
+					else -> 1004
+				}
+			}
+			PlaybackException.ERROR_CODE_IO_UNSPECIFIED -> 1005
+			else -> error.errorCode
+		}
+	}
+
+	private fun isTransientError(error: PlaybackException): Boolean {
+		val code = mapErrorCode(error)
+		return code in listOf(1001, 1002, 1003, 1005)
 	}
 
 	private fun ensureSession() {
@@ -790,13 +821,19 @@ object AudioProController {
 				}
 
 				val message = error.message ?: "Unknown error"
-				// First, emit PLAYBACK_ERROR event with error details
-				emitError(message, 500, "onPlayerError(${error.errorCode})")
+				val mappedCode = mapErrorCode(error)
 
-				// Then use the shared resetInternal function to:
-				// 1. Clear the player state (like clear())
-				// 2. Emit STATE_CHANGED: ERROR
-				resetInternal(AudioProModule.STATE_ERROR)
+				if (isTransientError(error)) {
+					// Transient error: emit soft PLAYBACK_ERROR, do NOT teardown.
+					// ExoPlayer's LoadErrorHandlingPolicy will handle retries.
+					log("Transient error (code=$mappedCode): $message")
+					emitError("Network retry: $message", mappedCode, "onPlayerError(transient, ${error.errorCode})")
+				} else {
+					// Fatal error: full teardown as before
+					log("Fatal error (code=$mappedCode): $message")
+					emitError(message, mappedCode, "onPlayerError(fatal, ${error.errorCode})")
+					resetInternal(AudioProModule.STATE_ERROR)
+				}
 			}
 		}
 

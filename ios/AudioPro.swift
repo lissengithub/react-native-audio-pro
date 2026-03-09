@@ -79,6 +79,8 @@ class AudioPro: RCTEventEmitter {
 	private static var configMinBufferMs: Double = 30_000
 	private static var configBufferForPlaybackMs: Double = 2_500
 	private static var configBufferForPlaybackAfterRebufferMs: Double = 5_000
+	private static var configMaxRetries: Int = 5
+	private static var configRetryBackoffMs: Double = 1000
 
 	////////////////////////////////////////////////////////////
 	// MARK: - React Native Event Emitter Overrides
@@ -296,6 +298,8 @@ class AudioPro: RCTEventEmitter {
 		if let val = options["minBufferMs"] as? Double { AudioPro.configMinBufferMs = val }
 		if let val = options["bufferForPlaybackMs"] as? Double { AudioPro.configBufferForPlaybackMs = val }
 		if let val = options["bufferForPlaybackAfterRebufferMs"] as? Double { AudioPro.configBufferForPlaybackAfterRebufferMs = val }
+		if let val = options["maxRetries"] as? Int { AudioPro.configMaxRetries = val }
+		if let val = options["retryBackoffMs"] as? Double { AudioPro.configRetryBackoffMs = val }
 	}
 
 	@objc(play:withOptions:)

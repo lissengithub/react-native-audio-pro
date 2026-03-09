@@ -212,6 +212,20 @@ describe('AudioPro configuration', () => {
 		warnSpy.mockRestore();
 	});
 
+	it('forwards retry config to native configure', () => {
+		AudioPro.configure({
+			maxRetries: 3,
+			retryBackoffMs: 2000,
+		});
+
+		expect(NativeModules.AudioPro.configure).toHaveBeenCalledWith(
+			expect.objectContaining({
+				maxRetries: 3,
+				retryBackoffMs: 2000,
+			}),
+		);
+	});
+
 	it('converts deprecated skipInterval seconds to milliseconds', () => {
 		const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
 
