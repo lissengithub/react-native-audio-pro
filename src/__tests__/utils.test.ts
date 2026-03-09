@@ -136,8 +136,8 @@ describe('validateTrack', () => {
 	it('fails without url', () => {
 		expect(validateTrack({ ...baseTrack, url: '' } as any)).toBe(false);
 	});
-	it('fails with invalid artwork', () => {
-		expect(validateTrack({ ...baseTrack, artwork: '' } as any)).toBe(false);
+	it('allows empty artwork (artwork is optional)', () => {
+		expect(validateTrack({ ...baseTrack, artwork: '' } as any)).toBe(true);
 	});
 	it('fails if album or artist are wrong type', () => {
 		expect(validateTrack({ ...baseTrack, album: 123 } as any)).toBe(false);
