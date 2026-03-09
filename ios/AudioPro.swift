@@ -78,10 +78,9 @@ class AudioPro: RCTEventEmitter {
 	private var retryCount: Int = 0
 
 	// JS-configurable buffer/retry settings
+	// Note: iOS only uses maxBufferMs (via preferredForwardBufferDuration).
+	// minBufferMs, bufferForPlaybackMs, bufferForPlaybackAfterRebufferMs are Android-only.
 	private static var configMaxBufferMs: Double = 120_000
-	private static var configMinBufferMs: Double = 30_000
-	private static var configBufferForPlaybackMs: Double = 2_500
-	private static var configBufferForPlaybackAfterRebufferMs: Double = 5_000
 	private static var configMaxRetries: Int = 5
 	private static var configRetryBackoffMs: Double = 1000
 
@@ -307,9 +306,7 @@ class AudioPro: RCTEventEmitter {
 	@objc(configure:)
 	func configure(_ options: NSDictionary) {
 		if let val = options["maxBufferMs"] as? Double { AudioPro.configMaxBufferMs = val }
-		if let val = options["minBufferMs"] as? Double { AudioPro.configMinBufferMs = val }
-		if let val = options["bufferForPlaybackMs"] as? Double { AudioPro.configBufferForPlaybackMs = val }
-		if let val = options["bufferForPlaybackAfterRebufferMs"] as? Double { AudioPro.configBufferForPlaybackAfterRebufferMs = val }
+		// minBufferMs, bufferForPlaybackMs, bufferForPlaybackAfterRebufferMs are Android-only (no iOS equivalent)
 		if let val = options["maxRetries"] as? Int { AudioPro.configMaxRetries = val }
 		if let val = options["retryBackoffMs"] as? Double { AudioPro.configRetryBackoffMs = val }
 	}
@@ -952,7 +949,7 @@ class AudioPro: RCTEventEmitter {
 						} else {
 							// Fatal error or retries exhausted: full teardown
 							log("Fatal error (code=\(errorCode)): \(error.localizedDescription)")
-							onError("Player item failed: \(error.localizedDescription)")
+							onError("Player item failed: \(error.localizedDescription)", code: errorCode)
 						}
 					} else {
 						onError("Player item failed with unknown error")
@@ -1148,45 +1145,54 @@ class AudioPro: RCTEventEmitter {
 		}
 
 		retryCount += 1
-		let maxRetries = AudioPro.configMaxRetries
 
-		if retryCount > maxRetries {
-			log("Retry limit reached (\(maxRetries)), triggering fatal error")
-			onError("Network error: retry limit reached after \(maxRetries) attempts")
-			return
-		}
+		let delaySeconds = Double(retryCount) * AudioPro.configRetryBackoffMs / 1000.0
+		log("Retrying playback (attempt \(retryCount)/\(AudioPro.configMaxRetries)) after \(delaySeconds)s")
 
-		log("Retrying playback (attempt \(retryCount)/\(maxRetries))")
+		DispatchQueue.main.asyncAfter(deadline: .now() + delaySeconds) { [weak self] in
+			guard let self = self, let player = self.player else { return }
 
-		// Remove KVO from old item
-		if let oldItem = player.currentItem, isStatusObserverAdded {
-			oldItem.removeObserver(self, forKeyPath: "status")
-			isStatusObserverAdded = false
-		}
+			// Bail if a new play() call started different playback while we were waiting
+			guard asset === self.currentAsset else {
+				self.log("Retry cancelled: asset changed (new play() call)")
+				return
+			}
 
-		// Create fresh AVPlayerItem from same AVURLAsset (preserves custom headers)
-		let newItem = AVPlayerItem(asset: asset)
-		newItem.preferredForwardBufferDuration = AudioPro.configMaxBufferMs / 1000.0
+			// Capture old item before replacement for scoped observer cleanup
+			let oldItem = player.currentItem
 
-		// Add KVO to new item
-		newItem.addObserver(self, forKeyPath: "status", options: [.new], context: nil)
-		isStatusObserverAdded = true
+			// Remove KVO from old item
+			if let oldItem = oldItem, self.isStatusObserverAdded {
+				oldItem.removeObserver(self, forKeyPath: "status")
+				self.isStatusObserverAdded = false
+			}
 
-		// Replace item - player stays alive
-		player.replaceCurrentItem(with: newItem)
+			// Create fresh AVPlayerItem from same AVURLAsset (preserves custom headers)
+			let newItem = AVPlayerItem(asset: asset)
+			newItem.preferredForwardBufferDuration = AudioPro.configMaxBufferMs / 1000.0
 
-		// Re-add track completion observer for new item
-		NotificationCenter.default.removeObserver(self, name: .AVPlayerItemDidPlayToEndTime, object: nil)
-		NotificationCenter.default.addObserver(
-			self,
-			selector: #selector(playerItemDidPlayToEndTime(_:)),
-			name: .AVPlayerItemDidPlayToEndTime,
-			object: newItem
-		)
+			// Add KVO to new item
+			newItem.addObserver(self, forKeyPath: "status", options: [.new], context: nil)
+			self.isStatusObserverAdded = true
 
-		if shouldBePlaying {
-			player.play()
-			player.rate = currentPlaybackSpeed
+			// Replace item - player stays alive
+			player.replaceCurrentItem(with: newItem)
+
+			// Re-add track completion observer for new item (scoped to old item, not nil)
+			if let oldItem = oldItem {
+				NotificationCenter.default.removeObserver(self, name: .AVPlayerItemDidPlayToEndTime, object: oldItem)
+			}
+			NotificationCenter.default.addObserver(
+				self,
+				selector: #selector(self.playerItemDidPlayToEndTime(_:)),
+				name: .AVPlayerItemDidPlayToEndTime,
+				object: newItem
+			)
+
+			if self.shouldBePlaying {
+				player.play()
+				player.rate = self.currentPlaybackSpeed
+			}
 		}
 	}
 
@@ -1218,7 +1224,7 @@ class AudioPro: RCTEventEmitter {
 	 * This method is for unrecoverable player failures that require player teardown.
 	 * For non-critical errors that don't require state transition, use emitPlaybackError() instead.
 	 */
-	func onError(_ errorMessage: String) {
+	func onError(_ errorMessage: String, code: Int = GENERIC_ERROR_CODE) {
 		// If we're already in an error state, just log and return
 		if isInErrorState {
 			log("Already in error state, ignoring additional error: \(errorMessage)")
@@ -1229,7 +1235,7 @@ class AudioPro: RCTEventEmitter {
 			// First, emit PLAYBACK_ERROR event with error details
 			let errorPayload: [String: Any] = [
 				"error": errorMessage,
-				"errorCode": GENERIC_ERROR_CODE
+				"errorCode": code
 			]
 			sendEvent(type: EVENT_TYPE_PLAYBACK_ERROR, track: currentTrack, payload: errorPayload)
 		}
