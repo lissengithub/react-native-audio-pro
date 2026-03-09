@@ -244,12 +244,21 @@ class AudioPro: RCTEventEmitter {
 	}
 
 	private func sendProgressNoticeEvent() {
-		guard let player = player, let _ = player.currentItem, player.rate != 0 else { return }
+		guard let player = player, let currentItem = player.currentItem, player.rate != 0 else { return }
 		let info = getPlaybackInfo()
+
+		var bufferedPositionMs: Int = 0
+		if let timeRange = currentItem.loadedTimeRanges.last?.timeRangeValue {
+			let bufferedEnd = CMTimeGetSeconds(CMTimeRangeGetEnd(timeRange))
+			if !bufferedEnd.isNaN && !bufferedEnd.isInfinite {
+				bufferedPositionMs = Int(round(bufferedEnd * 1000))
+			}
+		}
 
 		let payload: [String: Any] = [
 			"position": info.position,
-			"duration": info.duration
+			"duration": info.duration,
+			"bufferedPosition": bufferedPositionMs
 		]
 		sendEvent(type: EVENT_TYPE_PROGRESS, track: info.track, payload: payload)
 	}
