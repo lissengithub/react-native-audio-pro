@@ -74,6 +74,9 @@ class AudioPro: RCTEventEmitter {
 	private var pendingStartTimeMs: Double? = nil
 	private var settingSkipIntervalMs: Double = 30000.0
 
+	private var currentAsset: AVURLAsset? = nil
+	private var retryCount: Int = 0
+
 	// JS-configurable buffer/retry settings
 	private static var configMaxBufferMs: Double = 120_000
 	private static var configMinBufferMs: Double = 30_000
@@ -378,6 +381,7 @@ class AudioPro: RCTEventEmitter {
 
 		sendStateEvent(state: STATE_LOADING, position: 0, duration: 0, track: currentTrack)
 		shouldBePlaying = autoPlay
+		self.retryCount = 0
 
 		let album = track["album"] as? String
 		let artist = track["artist"] as? String
@@ -417,10 +421,16 @@ class AudioPro: RCTEventEmitter {
 			// Create an AVAsset with the headers
 			let asset = AVURLAsset(url: url, options: ["AVURLAssetHTTPHeaderFieldsKey": headerFields])
 			item = AVPlayerItem(asset: asset)
+			self.currentAsset = asset
 		} else {
 			// No headers, use simple URL initialization
-			item = AVPlayerItem(url: url)
+			let asset = AVURLAsset(url: url)
+			item = AVPlayerItem(asset: asset)
+			self.currentAsset = asset
 		}
+
+		// Apply buffer tuning from JS config
+		item.preferredForwardBufferDuration = AudioPro.configMaxBufferMs / 1000.0
 
 		// Add observer to the new item
 		item.addObserver(self, forKeyPath: "status", options: [.new], context: nil)
@@ -434,6 +444,8 @@ class AudioPro: RCTEventEmitter {
 			// Replace the current item with the new one
 			player?.replaceCurrentItem(with: item)
 		}
+
+		player?.automaticallyWaitsToMinimizeStalling = true
 
 		// Add rate observer to the player
 		player?.addObserver(self, forKeyPath: "rate", options: [.new], context: nil)
@@ -929,7 +941,19 @@ class AudioPro: RCTEventEmitter {
 					}
 				case .failed:
 					if let error = item.error {
-						onError("Player item failed: \(error.localizedDescription)")
+						let nsError = error as NSError
+						let errorCode = mapAVErrorCode(nsError)
+
+						if isTransientAVError(nsError) && retryCount < AudioPro.configMaxRetries {
+							// Transient error: emit soft PLAYBACK_ERROR and retry
+							log("Transient error (code=\(errorCode)): \(error.localizedDescription)")
+							emitPlaybackError("Network retry \(retryCount + 1)/\(AudioPro.configMaxRetries): \(error.localizedDescription)", code: errorCode)
+							retryWithCurrentAsset()
+						} else {
+							// Fatal error or retries exhausted: full teardown
+							log("Fatal error (code=\(errorCode)): \(error.localizedDescription)")
+							onError("Player item failed: \(error.localizedDescription)")
+						}
 					} else {
 						onError("Player item failed with unknown error")
 					}
@@ -961,6 +985,8 @@ class AudioPro: RCTEventEmitter {
 				// Actually playing audio
 				sendPlayingStateEvent()
 				startProgressTimer()
+				// Reset retry counter on successful playback
+				retryCount = 0
 			@unknown default:
 				break
 			}
@@ -1084,6 +1110,84 @@ class AudioPro: RCTEventEmitter {
 
 	private func updateNowPlayingInfoWithCurrentTime(_ time: Double) {
 		updateNowPlayingInfo(time: time)
+	}
+
+	private func mapAVErrorCode(_ error: NSError) -> Int {
+		switch error.domain {
+		case NSURLErrorDomain:
+			switch error.code {
+			case NSURLErrorTimedOut:
+				return 1002
+			case NSURLErrorNetworkConnectionLost, NSURLErrorNotConnectedToInternet:
+				return 1001
+			case NSURLErrorCannotConnectToHost, NSURLErrorCannotFindHost, NSURLErrorDNSLookupFailed:
+				return 1001
+			default:
+				return 1005
+			}
+		default:
+			return GENERIC_ERROR_CODE
+		}
+	}
+
+	private func isTransientAVError(_ error: NSError) -> Bool {
+		return error.domain == NSURLErrorDomain && [
+			NSURLErrorTimedOut,
+			NSURLErrorNetworkConnectionLost,
+			NSURLErrorNotConnectedToInternet,
+			NSURLErrorCannotConnectToHost,
+			NSURLErrorCannotFindHost,
+			NSURLErrorDNSLookupFailed
+		].contains(error.code)
+	}
+
+	private func retryWithCurrentAsset() {
+		guard let asset = currentAsset, let player = player else {
+			log("Cannot retry: no asset or player available")
+			return
+		}
+
+		retryCount += 1
+		let maxRetries = AudioPro.configMaxRetries
+
+		if retryCount > maxRetries {
+			log("Retry limit reached (\(maxRetries)), triggering fatal error")
+			onError("Network error: retry limit reached after \(maxRetries) attempts")
+			return
+		}
+
+		log("Retrying playback (attempt \(retryCount)/\(maxRetries))")
+
+		// Remove KVO from old item
+		if let oldItem = player.currentItem, isStatusObserverAdded {
+			oldItem.removeObserver(self, forKeyPath: "status")
+			isStatusObserverAdded = false
+		}
+
+		// Create fresh AVPlayerItem from same AVURLAsset (preserves custom headers)
+		let newItem = AVPlayerItem(asset: asset)
+		newItem.preferredForwardBufferDuration = AudioPro.configMaxBufferMs / 1000.0
+
+		// Add KVO to new item
+		newItem.addObserver(self, forKeyPath: "status", options: [.new], context: nil)
+		isStatusObserverAdded = true
+
+		// Replace item - player stays alive
+		player.replaceCurrentItem(with: newItem)
+
+		// Re-add track completion observer for new item
+		NotificationCenter.default.removeObserver(self, name: .AVPlayerItemDidPlayToEndTime, object: nil)
+		NotificationCenter.default.addObserver(
+			self,
+			selector: #selector(playerItemDidPlayToEndTime(_:)),
+			name: .AVPlayerItemDidPlayToEndTime,
+			object: newItem
+		)
+
+		if shouldBePlaying {
+			player.play()
+			player.rate = currentPlaybackSpeed
+		}
 	}
 
 	/**
