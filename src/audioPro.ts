@@ -95,6 +95,7 @@ export const AudioPro = {
 		setDebug(!!options.debug);
 		setDebugIncludesProgress(options.debugIncludesProgress ?? false);
 		logDebug('AudioPro: configure()', config);
+		NativeAudioPro.configure(config);
 	},
 
 	/**

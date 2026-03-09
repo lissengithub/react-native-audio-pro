@@ -20,6 +20,7 @@ jest.mock('react-native', () => ({
 			setPlaybackSpeed: jest.fn(),
 			setVolume: jest.fn(),
 			clear: jest.fn(),
+			configure: jest.fn(),
 		},
 	},
 	NativeEventEmitter: jest.fn().mockImplementation(() => ({
@@ -81,7 +82,15 @@ function createEmitterMock(modulePath) {
 }
 
 createInternalStoreMock('./src/internalStore');
-createInternalStoreMock('./.conductor/hong-kong/src/internalStore');
+try {
+	createInternalStoreMock('./.conductor/hong-kong/src/internalStore');
+} catch {
+	// optional path — may not exist
+}
 
 createEmitterMock('./src/emitter');
-createEmitterMock('./.conductor/hong-kong/src/emitter');
+try {
+	createEmitterMock('./.conductor/hong-kong/src/emitter');
+} catch {
+	// optional path — may not exist
+}

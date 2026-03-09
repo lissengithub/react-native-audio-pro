@@ -74,6 +74,12 @@ class AudioPro: RCTEventEmitter {
 	private var pendingStartTimeMs: Double? = nil
 	private var settingSkipIntervalMs: Double = 30000.0
 
+	// JS-configurable buffer/retry settings
+	private static var configMaxBufferMs: Double = 120_000
+	private static var configMinBufferMs: Double = 30_000
+	private static var configBufferForPlaybackMs: Double = 2_500
+	private static var configBufferForPlaybackAfterRebufferMs: Double = 5_000
+
 	////////////////////////////////////////////////////////////
 	// MARK: - React Native Event Emitter Overrides
 	////////////////////////////////////////////////////////////
@@ -282,6 +288,14 @@ class AudioPro: RCTEventEmitter {
 
 		// Remove playback ended notification observer
 		NotificationCenter.default.removeObserver(self, name: .AVPlayerItemDidPlayToEndTime, object: player?.currentItem)
+	}
+
+	@objc(configure:)
+	func configure(_ options: NSDictionary) {
+		if let val = options["maxBufferMs"] as? Double { AudioPro.configMaxBufferMs = val }
+		if let val = options["minBufferMs"] as? Double { AudioPro.configMinBufferMs = val }
+		if let val = options["bufferForPlaybackMs"] as? Double { AudioPro.configBufferForPlaybackMs = val }
+		if let val = options["bufferForPlaybackAfterRebufferMs"] as? Double { AudioPro.configBufferForPlaybackAfterRebufferMs = val }
 	}
 
 	@objc(play:withOptions:)

@@ -14,6 +14,8 @@ RCT_EXTERN_METHOD(setPlaybackSpeed:(double)speed)
 RCT_EXTERN_METHOD(setVolume:(double)volume)
 RCT_EXTERN_METHOD(clear)
 
+RCT_EXTERN_METHOD(configure:(NSDictionary *)options)
+
 RCT_EXTERN_METHOD(ambientPlay:(NSDictionary *)options)
 RCT_EXTERN_METHOD(ambientStop)
 RCT_EXTERN_METHOD(ambientSetVolume:(double)volume)

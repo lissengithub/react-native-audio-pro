@@ -28,6 +28,12 @@ import kotlin.math.abs
 object AudioProController {
 	private const val DUPLICATE_POSITION_EPSILON_MS = 250L
 
+	// JS-configurable buffer tuning defaults
+	var bufferMinMs: Int = 30_000
+	var bufferMaxMs: Int = 120_000
+	var bufferForPlaybackMs: Int = 2_500
+	var bufferForPlaybackAfterRebufferMs: Int = 5_000
+
 	private var reactContext: ReactApplicationContext? = null
 	private lateinit var engineBrowserFuture: ListenableFuture<MediaBrowser>
 	private var enginerBrowser: MediaBrowser? = null
@@ -76,6 +82,13 @@ object AudioProController {
 
 	fun setReactContext(context: ReactApplicationContext?) {
 		reactContext = context
+	}
+
+	fun configure(options: ReadableMap) {
+		if (options.hasKey("minBufferMs")) bufferMinMs = options.getInt("minBufferMs")
+		if (options.hasKey("maxBufferMs")) bufferMaxMs = options.getInt("maxBufferMs")
+		if (options.hasKey("bufferForPlaybackMs")) bufferForPlaybackMs = options.getInt("bufferForPlaybackMs")
+		if (options.hasKey("bufferForPlaybackAfterRebufferMs")) bufferForPlaybackAfterRebufferMs = options.getInt("bufferForPlaybackAfterRebufferMs")
 	}
 
 	private fun ensureSession() {
