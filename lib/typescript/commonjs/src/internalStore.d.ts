@@ -4,6 +4,7 @@ export interface AudioProStore {
     playerState: AudioProState;
     position: number;
     duration: number;
+    bufferedPosition: number;
     playbackSpeed: number;
     volume: number;
     debug: boolean;
