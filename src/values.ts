@@ -53,6 +53,8 @@ export enum AudioProEventType {
 	REMOTE_PREV = 'REMOTE_PREV',
 	/** Playback error has occurred */
 	PLAYBACK_ERROR = 'PLAYBACK_ERROR',
+	/** Native diagnostic event */
+	DIAGNOSTIC = 'DIAGNOSTIC',
 }
 
 /**

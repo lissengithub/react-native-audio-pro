@@ -71,6 +71,7 @@ class AudioPro: RCTEventEmitter {
 	private var isInErrorState: Bool = false
 	private var lastEmittedState: String = ""
 	private var wasPlayingBeforeInterruption: Bool = false
+	private var hasTrackEnded = false
 	private var pendingStartTimeMs: Double? = nil
 	private var settingSkipIntervalMs: Double = 30000.0
 
@@ -163,8 +164,15 @@ class AudioPro: RCTEventEmitter {
 			log("wasPlayingBeforeInterruption at end:", wasPlayingBeforeInterruption)
 			log("shouldResume:", options.contains(.shouldResume))
 
+			sendDiagnosticEvent(tag: "INTERRUPTION_ENDED", data: [
+				"shouldResume": options.contains(.shouldResume),
+				"wasPlaying": wasPlayingBeforeInterruption,
+				"hasTrackEnded": hasTrackEnded,
+				"willResume": wasPlayingBeforeInterruption && options.contains(.shouldResume) && !hasTrackEnded
+			])
+
 			// If playback should resume and we have permission to do so
-			if wasPlayingBeforeInterruption && options.contains(.shouldResume) {
+			if wasPlayingBeforeInterruption && options.contains(.shouldResume) && !hasTrackEnded {
 				log("Interruption ended with resume option, resuming playback")
 
 				// Try to reactivate the audio session
@@ -204,6 +212,12 @@ class AudioPro: RCTEventEmitter {
 		}
 
 		print("~~~ [AudioPro]", items.map { "\($0)" }.joined(separator: " "))
+	}
+
+	private func sendDiagnosticEvent(tag: String, data: [String: Any]) {
+		guard hasListeners else { return }
+		let payload: [String: Any] = ["tag": tag, "data": data]
+		sendEvent(type: "DIAGNOSTIC", track: currentTrack, payload: payload)
 	}
 
 	private func sendEvent(type: String, track: Any?, payload: [String: Any]?) {
@@ -437,9 +451,11 @@ class AudioPro: RCTEventEmitter {
 		if player == nil {
 			// Create a new AVPlayer instance
 			player = AVPlayer(playerItem: item)
+			hasTrackEnded = false
 		} else {
 			// Replace the current item with the new one
 			player?.replaceCurrentItem(with: item)
+			hasTrackEnded = false
 		}
 
 		player?.automaticallyWaitsToMinimizeStalling = true
@@ -895,9 +911,11 @@ class AudioPro: RCTEventEmitter {
 		isInErrorState = false
 		lastEmittedState = ""
 		shouldBePlaying = false
+		hasTrackEnded = true
 
-		player?.seek(to: .zero)
 		stopTimer()
+
+		sendDiagnosticEvent(tag: "TRACK_DID_END", data: ["hasTrackEnded": true])
 
 		updateNowPlayingInfo(time: 0, rate: 0)
 
@@ -1291,6 +1309,10 @@ class AudioPro: RCTEventEmitter {
 
 		commandCenter.playCommand.addTarget { [weak self] _ in
 			guard let self = self else { return .commandFailed }
+			if self.hasTrackEnded {
+				self.sendDiagnosticEvent(tag: "PLAY_COMMAND", data: ["blocked": true, "reason": "hasTrackEnded"])
+				return .success
+			}
 			if self.player?.rate == 0 {
 				self.resume()
 				return .success
@@ -1313,6 +1335,11 @@ class AudioPro: RCTEventEmitter {
 			guard let self = self, let player = self.player else { return .commandFailed }
 
 			self.log("Magic Tap (togglePlayPause) triggered")
+
+			if self.hasTrackEnded {
+				self.sendDiagnosticEvent(tag: "TOGGLE_PLAY_PAUSE", data: ["blocked": true, "reason": "hasTrackEnded"])
+				return .success
+			}
 
 			if player.rate > 0 {
 				// Currently playing → pause

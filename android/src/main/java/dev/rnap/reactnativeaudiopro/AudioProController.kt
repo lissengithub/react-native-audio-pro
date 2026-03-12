@@ -25,9 +25,11 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.guava.await
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.abs
 
 object AudioProController {
+	private val trackEndedEmitted = AtomicBoolean(false)
 	private const val DUPLICATE_POSITION_EPSILON_MS = 250L
 
 	// JS-configurable buffer tuning defaults
@@ -305,6 +307,7 @@ object AudioProController {
 		flowLastEmittedState = ""
 		flowLastEmittedPosition = null
 		flowLastEmittedDuration = null
+		trackEndedEmitted.set(false)
 	}
 
 	suspend fun play(track: ReadableMap, options: ReadableMap) {
@@ -492,6 +495,7 @@ object AudioProController {
 
 		// Clear pending seek state
 		flowPendingSeekPosition = null
+		trackEndedEmitted.set(false)
 
 		// Stop playback and ensure player is fully released before destroying service
 		runOnUiThread {
@@ -723,29 +727,14 @@ object AudioProController {
 						flowLastEmittedPosition = null
 						flowLastEmittedDuration = null
 
-						// 1. Pause playback to ensure state is correct
-						enginerBrowser?.pause()
-
-						// 2. Seek to position 0
-						enginerBrowser?.seekTo(0)
-
-						// 3. Cancel any pending seek operations
+						// Cancel any pending seek operations
 						flowPendingSeekPosition = null
 
-						// 4. Emit STOPPED (stopped = loaded but at 0, not playing)
+						// Emit STOPPED (stopped = loaded but at end, not playing)
 						emitState(
 							AudioProModule.STATE_STOPPED,
 							0L,
 							dur,
-							"onPlaybackStateChanged(STATE_ENDED)"
-						)
-
-						// 5. Emit TRACK_ENDED for JS
-						emitNotice(
-							AudioProModule.EVENT_TYPE_TRACK_ENDED,
-							dur,
-							dur,
-							0L,
 							"onPlaybackStateChanged(STATE_ENDED)"
 						)
 					}
@@ -941,6 +930,25 @@ object AudioProController {
 		flowLastEmittedDuration = sanitizedDuration
 		// Record time of this state emission
 		flowLastStateEmittedTimeMs = System.currentTimeMillis()
+	}
+
+	fun emitTrackEndedOnce(reason: String = "", durationHint: Long = -1L) {
+		if (!trackEndedEmitted.compareAndSet(false, true)) return
+
+		val dur = if (durationHint > 0) durationHint
+			else enginerBrowser?.duration?.takeIf { it > 0 } ?: 0L
+
+		emitNotice(AudioProModule.EVENT_TYPE_TRACK_ENDED, dur, dur, 0L, reason)
+	}
+
+	fun emitDiagnostic(tag: String, data: Map<String, Any?>) {
+		val payload = Arguments.createMap().apply {
+			putString("tag", tag)
+			putMap("data", Arguments.makeNativeMap(
+				data.filterValues { it != null }.mapValues { it.value!! } as HashMap<String, Any>
+			))
+		}
+		emitEvent(AudioProModule.EVENT_TYPE_DIAGNOSTIC, activeTrack, payload, "diagnostic")
 	}
 
 	private fun emitNotice(eventType: String, position: Long, duration: Long, bufferedPosition: Long = 0L, reason: String = "") {

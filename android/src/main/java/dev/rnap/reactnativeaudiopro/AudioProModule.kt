@@ -33,6 +33,7 @@ class AudioProModule(private val reactContext: ReactApplicationContext) :
 		const val EVENT_TYPE_REMOTE_NEXT = "REMOTE_NEXT"
 		const val EVENT_TYPE_REMOTE_PREV = "REMOTE_PREV"
 		const val EVENT_TYPE_PLAYBACK_SPEED_CHANGED = "PLAYBACK_SPEED_CHANGED"
+		const val EVENT_TYPE_DIAGNOSTIC = "DIAGNOSTIC"
 
 		// Trigger sources for seek events
 		const val TRIGGER_SOURCE_USER = "USER"

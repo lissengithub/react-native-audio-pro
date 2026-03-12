@@ -84,6 +84,8 @@ export interface AudioProEvent {
 		error?: string;
 		errorCode?: number;
 		speed?: number;
+		tag?: string;
+		data?: Record<string, unknown>;
 	};
 }
 

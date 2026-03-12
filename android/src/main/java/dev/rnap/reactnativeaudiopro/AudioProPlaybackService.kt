@@ -27,10 +27,35 @@ import androidx.media3.datasource.DataSource
 import androidx.media3.datasource.HttpDataSource.HttpDataSourceException
 import androidx.media3.datasource.HttpDataSource.InvalidResponseCodeException
 import androidx.media3.exoplayer.util.EventLogger
+import androidx.media3.common.ForwardingSimpleBasePlayer
+import com.google.common.util.concurrent.Futures
+import com.google.common.util.concurrent.ListenableFuture
 import androidx.media3.session.MediaConstants
 import androidx.media3.session.MediaLibraryService
 import androidx.media3.session.MediaSession
 import androidx.media3.session.MediaSession.ControllerInfo
+
+@UnstableApi
+class GuardedPlayer(player: Player) : ForwardingSimpleBasePlayer(player) {
+	override fun handleSetPlayWhenReady(playWhenReady: Boolean): ListenableFuture<*> {
+		if (playWhenReady && player.playbackState == Player.STATE_ENDED) {
+			val caller = AudioProPlaybackService.currentMediaSession
+				?.controllerForCurrentRequest?.packageName ?: "unknown"
+			AudioProController.emitTrackEndedOnce(
+				"GuardedPlayer.handleSetPlayWhenReady(STATE_ENDED) from $caller",
+				player.duration
+			)
+			AudioProController.emitDiagnostic("SESSION_COMMAND", mapOf(
+				"command" to "play",
+				"callerPackage" to caller,
+				"playerState" to "ENDED",
+				"action" to "blocked"
+			))
+			return Futures.immediateVoidFuture()
+		}
+		return super.handleSetPlayWhenReady(playWhenReady)
+	}
+}
 
 open class AudioProPlaybackService : MediaLibraryService() {
 
@@ -40,6 +65,7 @@ open class AudioProPlaybackService : MediaLibraryService() {
 	companion object {
 		private const val NOTIFICATION_ID = 789
 		private const val CHANNEL_ID = "audio_pro_notification_channel_id"
+		var currentMediaSession: MediaLibrarySession? = null
 	}
 
 	/**
@@ -92,16 +118,49 @@ open class AudioProPlaybackService : MediaLibraryService() {
 
 	private val playbackListener = object : Player.Listener {
 		override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
-			if (::player.isInitialized) {
-				updateForegroundState(player)
-			}
+			if (!::player.isInitialized) return
+			updateForegroundState(player)
+			AudioProController.emitDiagnostic("PLAY_WHEN_READY", mapOf(
+				"value" to playWhenReady,
+				"reason" to when (reason) {
+					Player.PLAY_WHEN_READY_CHANGE_REASON_USER_REQUEST -> "USER_REQUEST"
+					Player.PLAY_WHEN_READY_CHANGE_REASON_AUDIO_FOCUS_LOSS -> "AUDIO_FOCUS_LOSS"
+					Player.PLAY_WHEN_READY_CHANGE_REASON_AUDIO_BECOMING_NOISY -> "BECOMING_NOISY"
+					Player.PLAY_WHEN_READY_CHANGE_REASON_REMOTE -> "REMOTE"
+					Player.PLAY_WHEN_READY_CHANGE_REASON_END_OF_MEDIA_ITEM -> "END_OF_MEDIA_ITEM"
+					else -> "UNKNOWN($reason)"
+				},
+				"playerState" to stateToString(player.playbackState)
+			))
 		}
 
 		override fun onPlaybackStateChanged(playbackState: Int) {
-			if (::player.isInitialized) {
-				updateForegroundState(player)
+			if (!::player.isInitialized) return
+
+			if (playbackState == Player.STATE_ENDED) {
+				player.playWhenReady = false
+				AudioProController.emitTrackEndedOnce(
+					"service.onPlaybackStateChanged(STATE_ENDED)",
+					player.duration
+				)
 			}
+
+			updateForegroundState(player)
+			AudioProController.emitDiagnostic("SERVICE_STATE", mapOf(
+				"state" to stateToString(playbackState),
+				"playWhenReady" to player.playWhenReady,
+				"positionMs" to player.currentPosition,
+				"durationMs" to player.duration
+			))
 		}
+	}
+
+	private fun stateToString(state: Int): String = when (state) {
+		Player.STATE_IDLE -> "IDLE"
+		Player.STATE_BUFFERING -> "BUFFERING"
+		Player.STATE_READY -> "READY"
+		Player.STATE_ENDED -> "ENDED"
+		else -> "UNKNOWN($state)"
 	}
 
 	/**
@@ -139,6 +198,7 @@ open class AudioProPlaybackService : MediaLibraryService() {
 	@OptIn(UnstableApi::class)
 	override fun onDestroy() {
 		android.util.Log.d("AudioProPlaybackService", "Service being destroyed")
+		currentMediaSession = null
 
 		// Make sure to release all resources
 		try {
@@ -258,8 +318,10 @@ open class AudioProPlaybackService : MediaLibraryService() {
 		player.addAnalyticsListener(EventLogger())
 		player.addListener(playbackListener)
 
+		val guardedPlayer = GuardedPlayer(player)
+
 		mediaLibrarySession =
-			MediaLibrarySession.Builder(this, player, createLibrarySessionCallback())
+			MediaLibrarySession.Builder(this, guardedPlayer, createLibrarySessionCallback())
 				.also { builder -> getSessionActivityIntent()?.let { builder.setSessionActivity(it) } }
 				.build()
 				.also { mediaLibrarySession ->
@@ -295,6 +357,7 @@ open class AudioProPlaybackService : MediaLibraryService() {
 						mediaLibrarySession.setSessionExtras(bundleOf())
 					}
 				}
+		currentMediaSession = mediaLibrarySession
 
 		updateForegroundState(player)
 	}
@@ -344,9 +407,18 @@ open class AudioProPlaybackService : MediaLibraryService() {
 		}
 
 		val shouldBeForeground =
-			currentPlayer.playWhenReady &&
+			(currentPlayer.playWhenReady &&
 				(currentPlayer.playbackState == Player.STATE_BUFFERING ||
-					currentPlayer.playbackState == Player.STATE_READY)
+					currentPlayer.playbackState == Player.STATE_READY)) ||
+			(currentPlayer.playbackState == Player.STATE_ENDED &&
+				currentPlayer.currentMediaItem != null)
+
+		AudioProController.emitDiagnostic("FOREGROUND_STATE", mapOf(
+			"shouldBeForeground" to shouldBeForeground,
+			"playbackState" to stateToString(currentPlayer.playbackState),
+			"playWhenReady" to currentPlayer.playWhenReady,
+			"hasMediaItem" to (currentPlayer.currentMediaItem != null)
+		))
 
 		if (shouldBeForeground) {
 			if (!isForegroundRunning) {
