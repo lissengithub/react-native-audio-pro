@@ -232,6 +232,10 @@ open class AudioProPlaybackService : MediaLibraryService() {
 	 */
 	private fun removeNotificationAndStopService() {
 		try {
+			// Cancel any pending debounced detach
+			pendingDetachRunnable?.let { foregroundHandler.removeCallbacks(it) }
+			pendingDetachRunnable = null
+
 			// Remove notification directly
 			val notificationManager =
 				getSystemService(NOTIFICATION_SERVICE) as android.app.NotificationManager
@@ -421,16 +425,29 @@ open class AudioProPlaybackService : MediaLibraryService() {
 		))
 
 		if (shouldBeForeground) {
+			// Cancel any pending detach — we're staying foreground
+			pendingDetachRunnable?.let { foregroundHandler.removeCallbacks(it) }
+			pendingDetachRunnable = null
+
 			if (!isForegroundRunning) {
 				promoteToForeground(currentPlayer)
 			} else {
 				postNotification(currentPlayer, ongoing = true)
 			}
 		} else {
-			if (isForegroundRunning) {
-				detachForeground()
-				postNotification(currentPlayer, ongoing = false)
-			} else {
+			// Debounce detach to avoid flicker during track transitions
+			if (isForegroundRunning && pendingDetachRunnable == null) {
+				val runnable = Runnable {
+					pendingDetachRunnable = null
+					if (isForegroundRunning) {
+						val p = if (::player.isInitialized) player else null
+						detachForeground()
+						postNotification(p, ongoing = false)
+					}
+				}
+				pendingDetachRunnable = runnable
+				foregroundHandler.postDelayed(runnable, 500)
+			} else if (!isForegroundRunning) {
 				postNotification(currentPlayer, ongoing = false)
 			}
 		}
@@ -538,4 +555,6 @@ open class AudioProPlaybackService : MediaLibraryService() {
 
 	private var isForegroundRunning: Boolean = false
 	private var lastNotificationOngoing: Boolean? = null
+	private val foregroundHandler = android.os.Handler(android.os.Looper.getMainLooper())
+	private var pendingDetachRunnable: Runnable? = null
 }
