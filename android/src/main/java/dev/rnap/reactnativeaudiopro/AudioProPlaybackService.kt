@@ -166,7 +166,7 @@ open class AudioProPlaybackService : MediaLibraryService() {
 		private fun getAudioRouteFromManager(am: AudioManager): Map<String, String> {
 			val type: String
 			val name: String
-			if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+			if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
 				val attrs = AudioAttributes.Builder()
 					.setUsage(C.USAGE_MEDIA)
 					.setContentType(AudioProController.settingAudioContentType)
