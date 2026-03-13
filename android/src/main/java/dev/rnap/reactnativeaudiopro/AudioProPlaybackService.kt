@@ -396,8 +396,6 @@ open class AudioProPlaybackService : MediaLibraryService() {
 
 	private fun updateForegroundState(currentPlayer: Player) {
 		if (currentPlayer.currentMediaItem == null) {
-			pendingDetachRunnable?.let { foregroundHandler.removeCallbacks(it) }
-			pendingDetachRunnable = null
 			if (isForegroundRunning) {
 				detachForeground()
 			}
