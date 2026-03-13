@@ -5,8 +5,14 @@ import android.app.ForegroundServiceStartNotAllowedException
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
+import android.content.Context
 import android.content.pm.PackageManager
+import android.media.AudioDeviceCallback
+import android.media.AudioDeviceInfo
+import android.media.AudioManager
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import androidx.annotation.OptIn
 import androidx.annotation.RequiresPermission
 import androidx.core.app.NotificationCompat
@@ -54,20 +60,39 @@ class GuardedPlayer(player: Player) : ForwardingSimpleBasePlayer(player) {
 	}
 
 	override fun handleSetPlayWhenReady(playWhenReady: Boolean): ListenableFuture<*> {
-		if (playWhenReady && player.playbackState == Player.STATE_ENDED) {
-			val caller = AudioProPlaybackService.currentMediaSession
-				?.controllerForCurrentRequest?.packageName ?: "unknown"
-			AudioProController.emitTrackEndedOnce(
-				"GuardedPlayer.handleSetPlayWhenReady(STATE_ENDED) from $caller",
-				player.duration
-			)
-			AudioProController.emitDiagnostic("SESSION_COMMAND", mapOf(
-				"command" to "play",
-				"callerPackage" to caller,
-				"playerState" to "ENDED",
-				"action" to "blocked"
+		if (playWhenReady) {
+			val callerPackage = AudioProPlaybackService.currentMediaSession
+				?.controllerForCurrentRequest?.packageName
+			val ownPackage = AudioProPlaybackService.currentMediaSession
+				?.token?.packageName
+			val source = when {
+				callerPackage == null -> "UNKNOWN"
+				callerPackage == ownPackage -> "APP"
+				else -> "REMOTE"
+			}
+			val playerState = AudioProPlaybackService.stateToString(player.playbackState)
+
+			if (player.playbackState == Player.STATE_ENDED) {
+				AudioProController.emitTrackEndedOnce(
+					"GuardedPlayer.handleSetPlayWhenReady(STATE_ENDED) from ${callerPackage ?: "unknown"}",
+					player.duration
+				)
+				AudioProPlaybackService.emitDiagnosticWithEnvelope("PLAY_INTENT", mapOf(
+					"source" to source,
+					"action" to "BLOCKED",
+					"blockReason" to "TRACK_ENDED",
+					"playerState" to playerState,
+					"callerPackage" to (callerPackage ?: "unknown")
+				))
+				return Futures.immediateVoidFuture()
+			}
+
+			AudioProPlaybackService.emitDiagnosticWithEnvelope("PLAY_INTENT", mapOf(
+				"source" to source,
+				"action" to "ALLOWED",
+				"playerState" to playerState,
+				"callerPackage" to (callerPackage ?: "unknown")
 			))
-			return Futures.immediateVoidFuture()
 		}
 		return super.handleSetPlayWhenReady(playWhenReady)
 	}
@@ -95,11 +120,89 @@ open class AudioProPlaybackService : MediaLibraryService() {
 
 	private lateinit var mediaLibrarySession: MediaLibrarySession
 	private lateinit var player: ExoPlayer
+	private var wasPlayingBeforeFocusLoss: Boolean = false
+	private var audioDeviceCallback: AudioDeviceCallback? = null
 
 	companion object {
 		private const val NOTIFICATION_ID = 789
 		private const val CHANNEL_ID = "audio_pro_notification_channel_id"
 		var currentMediaSession: MediaLibrarySession? = null
+		private var diagnosticSeq = 0
+
+		fun stateToString(state: Int): String = when (state) {
+			Player.STATE_IDLE -> "IDLE"
+			Player.STATE_BUFFERING -> "BUFFERING"
+			Player.STATE_READY -> "READY"
+			Player.STATE_ENDED -> "ENDED"
+			else -> "UNKNOWN($state)"
+		}
+
+		fun emitDiagnosticWithEnvelope(tag: String, data: Map<String, Any?>) {
+			val trackId = AudioProController.activeTrack?.getString("id") ?: "unknown"
+			val envelope = mutableMapOf<String, Any?>(
+				"ts" to System.currentTimeMillis(),
+				"seq" to diagnosticSeq++,
+				"trackId" to trackId,
+				"route" to getAudioRouteStatic()
+			)
+			// Merge event-specific data, sanitizing negative Long values for duration fields
+			for ((key, value) in data) {
+				if (value is Long && value < 0 && (key.contains("duration", ignoreCase = true) || key.contains("Duration") || key == "durationMs" || key == "positionMs")) {
+					envelope[key] = 0L
+				} else {
+					envelope[key] = value
+				}
+			}
+			AudioProController.emitDiagnostic(tag, envelope)
+		}
+
+		private var audioManagerRef: AudioManager? = null
+
+		private fun getAudioRouteStatic(): Map<String, String> {
+			val am = audioManagerRef ?: return mapOf("type" to "UNKNOWN", "name" to "Unknown")
+			return getAudioRouteFromManager(am)
+		}
+
+		private fun getAudioRouteFromManager(am: AudioManager): Map<String, String> {
+			val type: String
+			val name: String
+			if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+				val attrs = AudioAttributes.Builder()
+					.setUsage(C.USAGE_MEDIA)
+					.setContentType(AudioProController.settingAudioContentType)
+					.build()
+				val devices = am.getAudioDevicesForAttributes(attrs.audioAttributesV21.audioAttributes)
+				val device = devices.firstOrNull()
+				type = device?.let { mapDeviceType(it.type) } ?: "UNKNOWN"
+				name = device?.productName?.toString() ?: "Unknown"
+			} else {
+				@Suppress("DEPRECATION")
+				type = when {
+					am.isBluetoothA2dpOn -> "BLUETOOTH_A2DP"
+					am.isBluetoothScoOn -> "BLUETOOTH_HFP"
+					am.isWiredHeadsetOn -> "WIRED_HEADSET"
+					am.isSpeakerphoneOn -> "SPEAKER"
+					else -> "SPEAKER"
+				}
+				name = type
+			}
+			return mapOf("type" to type, "name" to name)
+		}
+
+		private fun mapDeviceType(type: Int): String = when (type) {
+			AudioDeviceInfo.TYPE_BLUETOOTH_A2DP -> "BLUETOOTH_A2DP"
+			AudioDeviceInfo.TYPE_BLUETOOTH_SCO -> "BLUETOOTH_HFP"
+			AudioDeviceInfo.TYPE_WIRED_HEADSET -> "WIRED_HEADSET"
+			AudioDeviceInfo.TYPE_WIRED_HEADPHONES -> "WIRED_HEADPHONES"
+			AudioDeviceInfo.TYPE_BUILTIN_SPEAKER -> "SPEAKER"
+			AudioDeviceInfo.TYPE_BUILTIN_EARPIECE -> "EARPIECE"
+			AudioDeviceInfo.TYPE_USB_HEADSET, AudioDeviceInfo.TYPE_USB_DEVICE -> "USB"
+			AudioDeviceInfo.TYPE_DOCK -> "LINE_OUT"
+			else -> {
+				if (Build.VERSION.SDK_INT >= 31 && type == AudioDeviceInfo.TYPE_BLE_HEADSET) "BLUETOOTH_LE"
+				else "UNKNOWN"
+			}
+		}
 	}
 
 	/**
@@ -144,6 +247,30 @@ open class AudioProPlaybackService : MediaLibraryService() {
 		super.onCreate()
 		setListener(MediaSessionServiceListener())
 		initializeSessionAndPlayer()
+
+		// Register AudioDeviceCallback for route change diagnostics
+		val am = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+		audioManagerRef = am
+		val callback = object : AudioDeviceCallback() {
+			override fun onAudioDevicesAdded(addedDevices: Array<out AudioDeviceInfo>) {
+				val outputDevices = addedDevices.filter { it.isSink }
+				if (outputDevices.isNotEmpty()) {
+					emitDiagnosticWithEnvelope("AUDIO_ROUTE_CHANGED", mapOf(
+						"reason" to "NEW_DEVICE"
+					))
+				}
+			}
+			override fun onAudioDevicesRemoved(removedDevices: Array<out AudioDeviceInfo>) {
+				val outputDevices = removedDevices.filter { it.isSink }
+				if (outputDevices.isNotEmpty()) {
+					emitDiagnosticWithEnvelope("AUDIO_ROUTE_CHANGED", mapOf(
+						"reason" to "DEVICE_REMOVED"
+					))
+				}
+			}
+		}
+		audioDeviceCallback = callback
+		am.registerAudioDeviceCallback(callback, Handler(Looper.getMainLooper()))
 	}
 
 	override fun onGetSession(controllerInfo: ControllerInfo): MediaLibrarySession {
@@ -154,24 +281,63 @@ open class AudioProPlaybackService : MediaLibraryService() {
 		override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
 			if (!::player.isInitialized) return
 			updateForegroundState(player)
-			AudioProController.emitDiagnostic("PLAY_WHEN_READY", mapOf(
-				"value" to playWhenReady,
-				"reason" to when (reason) {
-					Player.PLAY_WHEN_READY_CHANGE_REASON_USER_REQUEST -> "USER_REQUEST"
-					Player.PLAY_WHEN_READY_CHANGE_REASON_AUDIO_FOCUS_LOSS -> "AUDIO_FOCUS_LOSS"
-					Player.PLAY_WHEN_READY_CHANGE_REASON_AUDIO_BECOMING_NOISY -> "BECOMING_NOISY"
-					Player.PLAY_WHEN_READY_CHANGE_REASON_REMOTE -> "REMOTE"
-					Player.PLAY_WHEN_READY_CHANGE_REASON_END_OF_MEDIA_ITEM -> "END_OF_MEDIA_ITEM"
-					else -> "UNKNOWN($reason)"
-				},
-				"playerState" to stateToString(player.playbackState)
+
+			val reasonStr = when (reason) {
+				Player.PLAY_WHEN_READY_CHANGE_REASON_USER_REQUEST -> "USER_REQUEST"
+				Player.PLAY_WHEN_READY_CHANGE_REASON_AUDIO_FOCUS_LOSS -> "AUDIO_FOCUS_LOSS"
+				Player.PLAY_WHEN_READY_CHANGE_REASON_AUDIO_BECOMING_NOISY -> "BECOMING_NOISY"
+				Player.PLAY_WHEN_READY_CHANGE_REASON_REMOTE -> "REMOTE"
+				Player.PLAY_WHEN_READY_CHANGE_REASON_END_OF_MEDIA_ITEM -> "END_OF_MEDIA_ITEM"
+				else -> "UNKNOWN($reason)"
+			}
+
+			val positionMs = player.currentPosition.let { if (it < 0) 0L else it }
+			val durationMs = player.duration.let { if (it < 0 || it == C.TIME_UNSET) 0L else it }
+
+			emitDiagnosticWithEnvelope("PLAYBACK_STATE_CHANGE", mapOf(
+				"state" to Companion.stateToString(player.playbackState),
+				"playWhenReady" to playWhenReady,
+				"reason" to reasonStr,
+				"positionMs" to positionMs,
+				"durationMs" to durationMs
 			))
+
+			// INTERRUPTION tracking
+			if (reason == Player.PLAY_WHEN_READY_CHANGE_REASON_AUDIO_FOCUS_LOSS && !playWhenReady) {
+				wasPlayingBeforeFocusLoss = true
+				val hasTrackEnded = player.playbackState == Player.STATE_ENDED
+				emitDiagnosticWithEnvelope("INTERRUPTION", mapOf(
+					"type" to "BEGAN",
+					"wasPlaying" to true,
+					"hasTrackEnded" to hasTrackEnded
+				))
+			} else if (wasPlayingBeforeFocusLoss && playWhenReady &&
+				(reason == Player.PLAY_WHEN_READY_CHANGE_REASON_USER_REQUEST || reason == Player.PLAY_WHEN_READY_CHANGE_REASON_REMOTE)) {
+				val hasTrackEnded = player.playbackState == Player.STATE_ENDED
+				emitDiagnosticWithEnvelope("INTERRUPTION", mapOf(
+					"type" to "ENDED",
+					"wasPlaying" to true,
+					"shouldResume" to true,
+					"willResume" to true,
+					"hasTrackEnded" to hasTrackEnded
+				))
+				wasPlayingBeforeFocusLoss = false
+			}
 		}
 
 		override fun onPlaybackStateChanged(playbackState: Int) {
 			if (!::player.isInitialized) return
 
+			val positionMs = player.currentPosition.let { if (it < 0) 0L else it }
+			val durationMs = player.duration.let { if (it < 0 || it == C.TIME_UNSET) 0L else it }
+
 			if (playbackState == Player.STATE_ENDED) {
+				// Emit TRACK_DID_END before dedup/emitTrackEndedOnce
+				emitDiagnosticWithEnvelope("TRACK_DID_END", mapOf(
+					"positionMs" to positionMs,
+					"durationMs" to durationMs
+				))
+
 				player.playWhenReady = false
 				AudioProController.emitTrackEndedOnce(
 					"service.onPlaybackStateChanged(STATE_ENDED)",
@@ -180,22 +346,16 @@ open class AudioProPlaybackService : MediaLibraryService() {
 			}
 
 			updateForegroundState(player)
-			AudioProController.emitDiagnostic("SERVICE_STATE", mapOf(
-				"state" to stateToString(playbackState),
+			emitDiagnosticWithEnvelope("PLAYBACK_STATE_CHANGE", mapOf(
+				"state" to Companion.stateToString(playbackState),
 				"playWhenReady" to player.playWhenReady,
-				"positionMs" to player.currentPosition,
-				"durationMs" to player.duration
+				"positionMs" to positionMs,
+				"durationMs" to durationMs
 			))
 		}
 	}
 
-	private fun stateToString(state: Int): String = when (state) {
-		Player.STATE_IDLE -> "IDLE"
-		Player.STATE_BUFFERING -> "BUFFERING"
-		Player.STATE_READY -> "READY"
-		Player.STATE_ENDED -> "ENDED"
-		else -> "UNKNOWN($state)"
-	}
+	// stateToString is now in the companion object
 
 	/**
 	 * Called when the task is removed from the recent tasks list
@@ -233,6 +393,14 @@ open class AudioProPlaybackService : MediaLibraryService() {
 	override fun onDestroy() {
 		android.util.Log.d("AudioProPlaybackService", "Service being destroyed")
 		currentMediaSession = null
+
+		// Unregister audio device callback
+		audioDeviceCallback?.let { callback ->
+			val am = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+			am.unregisterAudioDeviceCallback(callback)
+			audioDeviceCallback = null
+		}
+		audioManagerRef = null
 
 		// Make sure to release all resources
 		try {

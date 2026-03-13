@@ -57,7 +57,7 @@ object AudioProController {
 			}
 		}
 
-	private var activeTrack: ReadableMap? = null
+	internal var activeTrack: ReadableMap? = null
 	private var activeVolume: Float = 1.0f
 	private var activePlaybackSpeed: Float = 1.0f
 
@@ -392,6 +392,13 @@ object AudioProController {
 				// Set the new media item and prepare the player
 				it.setMediaItem(mediaItem)
 				it.prepare()
+
+				// Emit TRACK_LOADED diagnostic
+				AudioProPlaybackService.emitDiagnosticWithEnvelope("TRACK_LOADED", mapOf(
+					"mediaId" to mediaItem.mediaId,
+					"url" to url.take(100),
+					"autoPlay" to opts.autoPlay
+				))
 
 				// Set playback speed regardless of autoPlay
 				it.setPlaybackSpeed(opts.speed)
