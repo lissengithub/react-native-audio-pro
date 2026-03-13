@@ -55,6 +55,7 @@ class AudioPro: RCTEventEmitter {
 	private var isStatusObserverAdded = false
 	private var isTimeControlObserverAdded = false
 	private var isRouteObserverRegistered = false
+	private var isInterruptionObserverRegistered = false
 
 	private var diagnosticSeq: Int = 0
 	private var isInterrupted = false
@@ -115,23 +116,25 @@ class AudioPro: RCTEventEmitter {
 	}
 
 	private func setupAudioSessionInterruptionObserver() {
-		// Register for audio session interruption notifications
+		guard !isInterruptionObserverRegistered else { return }
 		NotificationCenter.default.addObserver(
 			self,
 			selector: #selector(handleAudioSessionInterruption(_:)),
 			name: AVAudioSession.interruptionNotification,
 			object: nil
 		)
-
+		isInterruptionObserverRegistered = true
 		log("Registered for audio session interruption notifications")
 	}
 
 	private func removeAudioSessionInterruptionObserver() {
+		guard isInterruptionObserverRegistered else { return }
 		NotificationCenter.default.removeObserver(
 			self,
 			name: AVAudioSession.interruptionNotification,
 			object: nil
 		)
+		isInterruptionObserverRegistered = false
 	}
 
 	private func registerRouteChangeObserver() {
