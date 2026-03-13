@@ -37,6 +37,22 @@ import androidx.media3.session.MediaSession.ControllerInfo
 
 @UnstableApi
 class GuardedPlayer(player: Player) : ForwardingSimpleBasePlayer(player) {
+
+	override fun getState(): State {
+		val state = super.getState()
+		// Advertise next/prev commands so Bluetooth and external controllers
+		// can send them, even though the player only has a single media item.
+		val commands = state.availableCommands.buildUpon()
+			.add(Player.COMMAND_SEEK_TO_NEXT_MEDIA_ITEM)
+			.add(Player.COMMAND_SEEK_TO_PREVIOUS_MEDIA_ITEM)
+			.add(Player.COMMAND_SEEK_TO_NEXT)
+			.add(Player.COMMAND_SEEK_TO_PREVIOUS)
+			.build()
+		return state.buildUpon()
+			.setAvailableCommands(commands)
+			.build()
+	}
+
 	override fun handleSetPlayWhenReady(playWhenReady: Boolean): ListenableFuture<*> {
 		if (playWhenReady && player.playbackState == Player.STATE_ENDED) {
 			val caller = AudioProPlaybackService.currentMediaSession
@@ -54,6 +70,16 @@ class GuardedPlayer(player: Player) : ForwardingSimpleBasePlayer(player) {
 			return Futures.immediateVoidFuture()
 		}
 		return super.handleSetPlayWhenReady(playWhenReady)
+	}
+
+	override fun handleSeekToNextMediaItem(): ListenableFuture<*> {
+		AudioProController.emitNext("GuardedPlayer.handleSeekToNextMediaItem")
+		return Futures.immediateVoidFuture()
+	}
+
+	override fun handleSeekToPreviousMediaItem(): ListenableFuture<*> {
+		AudioProController.emitPrev("GuardedPlayer.handleSeekToPreviousMediaItem")
+		return Futures.immediateVoidFuture()
 	}
 }
 
