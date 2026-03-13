@@ -307,7 +307,9 @@ object AudioProController {
 		flowLastEmittedState = ""
 		flowLastEmittedPosition = null
 		flowLastEmittedDuration = null
-		trackEndedEmitted.set(false)
+		// Note: trackEndedEmitted is reset in the runOnUiThread block in play(),
+		// right before setMediaItem, to avoid a race where a remote play command
+		// could arrive between the reset and the new media item being set.
 	}
 
 	suspend fun play(track: ReadableMap, options: ReadableMap) {
@@ -380,6 +382,11 @@ object AudioProController {
 		runOnUiThread {
 			log("Play", title, url)
 			emitState(AudioProModule.STATE_LOADING, 0L, 0L, "play()")
+
+			// Reset dedup flag here (same looper iteration as setMediaItem)
+			// to prevent a race where a remote play command between
+			// prepareForNewPlayback() and this block could re-emit TRACK_ENDED.
+			trackEndedEmitted.set(false)
 
 			enginerBrowser?.let {
 				// Set the new media item and prepare the player

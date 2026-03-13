@@ -71,7 +71,12 @@ class AudioPro: RCTEventEmitter {
 	private var isInErrorState: Bool = false
 	private var lastEmittedState: String = ""
 	private var wasPlayingBeforeInterruption: Bool = false
-	private var hasTrackEnded = false
+	private let trackEndedLock = NSLock()
+	private var _hasTrackEnded = false
+	private var hasTrackEnded: Bool {
+		get { trackEndedLock.lock(); defer { trackEndedLock.unlock() }; return _hasTrackEnded }
+		set { trackEndedLock.lock(); defer { trackEndedLock.unlock() }; _hasTrackEnded = newValue }
+	}
 	private var pendingStartTimeMs: Double? = nil
 	private var settingSkipIntervalMs: Double = 30000.0
 
@@ -476,6 +481,11 @@ class AudioPro: RCTEventEmitter {
 		nowPlayingInfo[MPNowPlayingInfoPropertyPlaybackRate] = 1.0
 		// Duration is set asynchronously via progress events once the player item loads
 		MPNowPlayingInfoCenter.default().nowPlayingInfo = nowPlayingInfo
+
+		// Remove any existing track-end observer before adding a new one
+		if let oldItem = player?.currentItem, oldItem !== item {
+			NotificationCenter.default.removeObserver(self, name: .AVPlayerItemDidPlayToEndTime, object: oldItem)
+		}
 
 		// Add notification observer for track completion to the new item
 		NotificationCenter.default.addObserver(
