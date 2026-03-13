@@ -72,14 +72,22 @@ class GuardedPlayer(player: Player) : ForwardingSimpleBasePlayer(player) {
 		return super.handleSetPlayWhenReady(playWhenReady)
 	}
 
-	override fun handleSeekToNextMediaItem(): ListenableFuture<*> {
-		AudioProController.emitNext("GuardedPlayer.handleSeekToNextMediaItem")
-		return Futures.immediateVoidFuture()
-	}
-
-	override fun handleSeekToPreviousMediaItem(): ListenableFuture<*> {
-		AudioProController.emitPrev("GuardedPlayer.handleSeekToPreviousMediaItem")
-		return Futures.immediateVoidFuture()
+	override fun handleSeek(
+		mediaItemIndex: Int,
+		positionMs: Long,
+		seekCommand: Int
+	): ListenableFuture<*> {
+		when (seekCommand) {
+			Player.COMMAND_SEEK_TO_NEXT_MEDIA_ITEM, Player.COMMAND_SEEK_TO_NEXT -> {
+				AudioProController.emitNext("GuardedPlayer.handleSeek(NEXT)")
+				return Futures.immediateVoidFuture()
+			}
+			Player.COMMAND_SEEK_TO_PREVIOUS_MEDIA_ITEM, Player.COMMAND_SEEK_TO_PREVIOUS -> {
+				AudioProController.emitPrev("GuardedPlayer.handleSeek(PREV)")
+				return Futures.immediateVoidFuture()
+			}
+		}
+		return super.handleSeek(mediaItemIndex, positionMs, seekCommand)
 	}
 }
 
