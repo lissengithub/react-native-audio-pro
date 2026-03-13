@@ -48,7 +48,9 @@ export declare enum AudioProEventType {
     /** Remote previous button pressed */
     REMOTE_PREV = "REMOTE_PREV",
     /** Playback error has occurred */
-    PLAYBACK_ERROR = "PLAYBACK_ERROR"
+    PLAYBACK_ERROR = "PLAYBACK_ERROR",
+    /** Native diagnostic event */
+    DIAGNOSTIC = "DIAGNOSTIC"
 }
 /**
  * Sources for seek-complete events.
@@ -68,6 +70,25 @@ export declare enum AudioProAmbientEventType {
     /** Ambient audio error has occurred */
     AMBIENT_ERROR = "AMBIENT_ERROR"
 }
+/**
+ * Error codes for classifying playback errors
+ */
+export declare enum AudioProErrorCode {
+    /** Network connection failed */
+    NETWORK_DISCONNECTED = 1001,
+    /** Network connection timed out */
+    NETWORK_TIMEOUT = 1002,
+    /** HTTP server error (5xx) or retryable HTTP codes (408, 429) */
+    HTTP_SERVER_ERROR = 1003,
+    /** HTTP client error (4xx, non-retryable) */
+    HTTP_CLIENT_ERROR = 1004,
+    /** Unspecified I/O error */
+    IO_UNSPECIFIED = 1005
+}
+/**
+ * Check if an error code represents a transient (retryable) error
+ */
+export declare function isTransientErrorCode(code?: number): boolean;
 /**
  * Default skip interval in milliseconds (30 seconds)
  */

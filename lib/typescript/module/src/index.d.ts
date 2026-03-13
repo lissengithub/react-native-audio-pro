@@ -59,5 +59,9 @@ AudioProEventType,
 /** Types of audio content supported */
 AudioProContentType, 
 /** Types of ambient audio events */
-AudioProAmbientEventType, } from './values';
+AudioProAmbientEventType, 
+/** Error codes for classifying playback errors */
+AudioProErrorCode, 
+/** Check if an error code represents a transient (retryable) error */
+isTransientErrorCode, } from './values';
 //# sourceMappingURL=index.d.ts.map

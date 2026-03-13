@@ -54,6 +54,11 @@ class AudioPro: RCTEventEmitter {
 	private var isRateObserverAdded = false
 	private var isStatusObserverAdded = false
 	private var isTimeControlObserverAdded = false
+	private var isRouteObserverRegistered = false
+	private var isInterruptionObserverRegistered = false
+
+	private var diagnosticSeq: Int = 0
+	private var isInterrupted = false
 
 	private var currentPlaybackSpeed: Float = 1.0
 	private var currentTrack: NSDictionary?
@@ -71,6 +76,12 @@ class AudioPro: RCTEventEmitter {
 	private var isInErrorState: Bool = false
 	private var lastEmittedState: String = ""
 	private var wasPlayingBeforeInterruption: Bool = false
+	private let trackEndedLock = NSLock()
+	private var _hasTrackEnded = false
+	private var hasTrackEnded: Bool {
+		get { trackEndedLock.lock(); defer { trackEndedLock.unlock() }; return _hasTrackEnded }
+		set { trackEndedLock.lock(); defer { trackEndedLock.unlock() }; _hasTrackEnded = newValue }
+	}
 	private var pendingStartTimeMs: Double? = nil
 	private var settingSkipIntervalMs: Double = 30000.0
 
@@ -105,23 +116,96 @@ class AudioPro: RCTEventEmitter {
 	}
 
 	private func setupAudioSessionInterruptionObserver() {
-		// Register for audio session interruption notifications
+		guard !isInterruptionObserverRegistered else { return }
 		NotificationCenter.default.addObserver(
 			self,
 			selector: #selector(handleAudioSessionInterruption(_:)),
 			name: AVAudioSession.interruptionNotification,
 			object: nil
 		)
-
+		isInterruptionObserverRegistered = true
 		log("Registered for audio session interruption notifications")
 	}
 
 	private func removeAudioSessionInterruptionObserver() {
+		guard isInterruptionObserverRegistered else { return }
 		NotificationCenter.default.removeObserver(
 			self,
 			name: AVAudioSession.interruptionNotification,
 			object: nil
 		)
+		isInterruptionObserverRegistered = false
+	}
+
+	private func registerRouteChangeObserver() {
+		guard !isRouteObserverRegistered else { return }
+		NotificationCenter.default.addObserver(
+			self,
+			selector: #selector(handleAudioSessionRouteChange(_:)),
+			name: AVAudioSession.routeChangeNotification,
+			object: nil
+		)
+		isRouteObserverRegistered = true
+		log("Registered for audio route change notifications")
+	}
+
+	private func removeRouteChangeObserver() {
+		guard isRouteObserverRegistered else { return }
+		NotificationCenter.default.removeObserver(
+			self,
+			name: AVAudioSession.routeChangeNotification,
+			object: nil
+		)
+		isRouteObserverRegistered = false
+	}
+
+	@objc private func handleAudioSessionRouteChange(_ notification: Notification) {
+		guard let userInfo = notification.userInfo,
+			  let reasonValue = userInfo[AVAudioSessionRouteChangeReasonKey] as? UInt,
+			  let reason = AVAudioSession.RouteChangeReason(rawValue: reasonValue) else {
+			return
+		}
+
+		let reasonString: String
+		switch reason {
+		case .newDeviceAvailable:      reasonString = "NEW_DEVICE"
+		case .oldDeviceUnavailable:    reasonString = "DEVICE_REMOVED"
+		case .categoryChange:          reasonString = "CATEGORY_CHANGE"
+		case .override:                reasonString = "OVERRIDE"
+		default:                       reasonString = "UNKNOWN"
+		}
+
+		var eventData: [String: Any] = [
+			"reason": reasonString
+		]
+
+		// Extract previous route
+		if let previousRoute = userInfo[AVAudioSessionRouteChangePreviousRouteKey] as? AVAudioSessionRouteDescription,
+		   let previousOutput = previousRoute.outputs.first {
+			let prevType = mapPortTypeToRouteType(previousOutput.portType)
+			eventData["previousRoute"] = ["type": prevType, "name": previousOutput.portName]
+		}
+
+		emitDiagnosticWithEnvelope(tag: "AUDIO_ROUTE_CHANGED", data: eventData)
+
+		// Becoming noisy: pause on headphone removal if playing and not interrupted
+		if reason == .oldDeviceUnavailable && shouldBePlaying && !isInterrupted {
+			log("Route change: device removed while playing, pausing (BECOMING_NOISY)")
+			shouldBePlaying = false
+			player?.pause()
+			stopTimer()
+			sendPausedStateEvent()
+			updateNowPlayingInfo(time: player?.currentTime().seconds ?? 0, rate: 0)
+
+			let info = getPlaybackInfo()
+			emitDiagnosticWithEnvelope(tag: "PLAYBACK_STATE_CHANGE", data: [
+				"state": STATE_PAUSED,
+				"playWhenReady": false,
+				"reason": "BECOMING_NOISY",
+				"positionMs": info.position,
+				"durationMs": info.duration
+			])
+		}
 	}
 
 	@objc private func handleAudioSessionInterruption(_ notification: Notification) {
@@ -136,8 +220,15 @@ class AudioPro: RCTEventEmitter {
 		switch type {
 		case .began:
 			// Interruption began (e.g., phone call, Siri, other app playing audio)
+			isInterrupted = true
 			wasPlayingBeforeInterruption = player?.rate != 0
 			log("wasPlayingBeforeInterruption set to", wasPlayingBeforeInterruption)
+
+			emitDiagnosticWithEnvelope(tag: "INTERRUPTION", data: [
+				"type": "BEGAN",
+				"wasPlaying": wasPlayingBeforeInterruption,
+				"hasTrackEnded": hasTrackEnded
+			])
 
 			if wasPlayingBeforeInterruption {
 				log("Interruption began while playing, pausing playback")
@@ -150,10 +241,20 @@ class AudioPro: RCTEventEmitter {
 
 				// Update now playing info to show paused state
 				updateNowPlayingInfo(time: player?.currentTime().seconds ?? 0, rate: 0)
+
+				let info = getPlaybackInfo()
+				emitDiagnosticWithEnvelope(tag: "PLAYBACK_STATE_CHANGE", data: [
+					"state": STATE_PAUSED,
+					"playWhenReady": false,
+					"reason": "INTERRUPTION",
+					"positionMs": info.position,
+					"durationMs": info.duration
+				])
 			}
 
 		case .ended:
 			// Interruption ended
+			isInterrupted = false
 			guard let optionsValue = userInfo[AVAudioSessionInterruptionOptionKey] as? UInt else {
 				return
 			}
@@ -163,8 +264,18 @@ class AudioPro: RCTEventEmitter {
 			log("wasPlayingBeforeInterruption at end:", wasPlayingBeforeInterruption)
 			log("shouldResume:", options.contains(.shouldResume))
 
+			let willResume = wasPlayingBeforeInterruption && options.contains(.shouldResume) && !hasTrackEnded
+
+			emitDiagnosticWithEnvelope(tag: "INTERRUPTION", data: [
+				"type": "ENDED",
+				"shouldResume": options.contains(.shouldResume),
+				"wasPlaying": wasPlayingBeforeInterruption,
+				"hasTrackEnded": hasTrackEnded,
+				"willResume": willResume
+			])
+
 			// If playback should resume and we have permission to do so
-			if wasPlayingBeforeInterruption && options.contains(.shouldResume) {
+			if willResume {
 				log("Interruption ended with resume option, resuming playback")
 
 				// Try to reactivate the audio session
@@ -177,6 +288,15 @@ class AudioPro: RCTEventEmitter {
 
 					// Update now playing info
 					updateNowPlayingInfo(time: player?.currentTime().seconds ?? 0, rate: 1.0)
+
+					let info = getPlaybackInfo()
+					emitDiagnosticWithEnvelope(tag: "PLAYBACK_STATE_CHANGE", data: [
+						"state": STATE_PLAYING,
+						"playWhenReady": true,
+						"reason": "INTERRUPTION",
+						"positionMs": info.position,
+						"durationMs": info.duration
+					])
 				} catch {
 					log("Failed to reactivate audio session: \(error.localizedDescription)")
 					emitPlaybackError("Failed to resume after interruption: \(error.localizedDescription)")
@@ -204,6 +324,85 @@ class AudioPro: RCTEventEmitter {
 		}
 
 		print("~~~ [AudioPro]", items.map { "\($0)" }.joined(separator: " "))
+	}
+
+	private func sendDiagnosticEvent(tag: String, data: [String: Any]) {
+		guard hasListeners else { return }
+		let payload: [String: Any] = ["tag": tag, "data": data]
+		sendEvent(type: "DIAGNOSTIC", track: currentTrack, payload: payload)
+	}
+
+	private func getAudioRoute() -> [String: String] {
+		guard let output = AVAudioSession.sharedInstance().currentRoute.outputs.first else {
+			return ["type": "UNKNOWN", "name": "Unknown"]
+		}
+		let type: String
+		switch output.portType {
+		case .bluetoothA2DP:    type = "BLUETOOTH_A2DP"
+		case .bluetoothHFP:     type = "BLUETOOTH_HFP"
+		case .bluetoothLE:      type = "BLUETOOTH_LE"
+		case .headphones:       type = "WIRED_HEADPHONES"
+		case .builtInSpeaker:   type = "SPEAKER"
+		case .builtInReceiver:  type = "EARPIECE"
+		case .carAudio:         type = "BLUETOOTH_A2DP"
+		case .airPlay:          type = "AIRPLAY"
+		case .usbAudio:         type = "USB"
+		case .lineOut:          type = "LINE_OUT"
+		default:                type = "UNKNOWN"
+		}
+		return ["type": type, "name": output.portName]
+	}
+
+	private func mapPortTypeToRouteType(_ portType: AVAudioSession.Port) -> String {
+		switch portType {
+		case .bluetoothA2DP:    return "BLUETOOTH_A2DP"
+		case .bluetoothHFP:     return "BLUETOOTH_HFP"
+		case .bluetoothLE:      return "BLUETOOTH_LE"
+		case .headphones:       return "WIRED_HEADPHONES"
+		case .builtInSpeaker:   return "SPEAKER"
+		case .builtInReceiver:  return "EARPIECE"
+		case .carAudio:         return "BLUETOOTH_A2DP"
+		case .airPlay:          return "AIRPLAY"
+		case .usbAudio:         return "USB"
+		case .lineOut:          return "LINE_OUT"
+		default:                return "UNKNOWN"
+		}
+	}
+
+	private func sanitizeNumber(_ value: Any?) -> Any {
+		if let intVal = value as? Int {
+			return intVal < 0 ? 0 : intVal
+		}
+		if let doubleVal = value as? Double {
+			if doubleVal.isNaN || doubleVal.isInfinite || doubleVal < 0 { return 0 }
+			return doubleVal
+		}
+		return value ?? 0
+	}
+
+	private func emitDiagnosticWithEnvelope(tag: String, data: [String: Any] = [:]) {
+		guard hasListeners else { return }
+
+		let trackId = (currentTrack?["id"] as? String) ?? "unknown"
+
+		var envelope: [String: Any] = [
+			"ts": Int(Date().timeIntervalSince1970 * 1000),
+			"seq": diagnosticSeq,
+			"trackId": trackId,
+			"route": getAudioRoute()
+		]
+
+		// Merge event-specific data, sanitizing duration/position fields
+		for (key, value) in data {
+			if key.lowercased().contains("duration") || key.lowercased().contains("position") {
+				envelope[key] = sanitizeNumber(value)
+			} else {
+				envelope[key] = value
+			}
+		}
+
+		diagnosticSeq += 1
+		sendDiagnosticEvent(tag: tag, data: envelope)
 	}
 
 	private func sendEvent(type: String, track: Any?, payload: [String: Any]?) {
@@ -371,6 +570,9 @@ class AudioPro: RCTEventEmitter {
 
 			// Set up audio session interruption observer
 			setupAudioSessionInterruptionObserver()
+
+			// Register route change observer (once)
+			registerRouteChangeObserver()
 		} catch {
 			onError("Audio session setup failed: \(error.localizedDescription)")
 			return
@@ -437,10 +639,25 @@ class AudioPro: RCTEventEmitter {
 		if player == nil {
 			// Create a new AVPlayer instance
 			player = AVPlayer(playerItem: item)
+			hasTrackEnded = false
 		} else {
 			// Replace the current item with the new one
 			player?.replaceCurrentItem(with: item)
+			hasTrackEnded = false
 		}
+
+		// Emit TRACK_LOADED diagnostic
+		emitDiagnosticWithEnvelope(tag: "TRACK_LOADED", data: [
+			"url": urlString,
+			"autoPlay": autoPlay
+		])
+
+		// Emit PLAY_INTENT diagnostic (JS-initiated)
+		emitDiagnosticWithEnvelope(tag: "PLAY_INTENT", data: [
+			"source": "APP",
+			"action": "ALLOWED",
+			"playerState": "BUFFERING"
+		])
 
 		player?.automaticallyWaitsToMinimizeStalling = true
 
@@ -461,6 +678,11 @@ class AudioPro: RCTEventEmitter {
 		// Duration is set asynchronously via progress events once the player item loads
 		MPNowPlayingInfoCenter.default().nowPlayingInfo = nowPlayingInfo
 
+		// Remove any existing track-end observer before adding a new one
+		if let oldItem = player?.currentItem, oldItem !== item {
+			NotificationCenter.default.removeObserver(self, name: .AVPlayerItemDidPlayToEndTime, object: oldItem)
+		}
+
 		// Add notification observer for track completion to the new item
 		NotificationCenter.default.addObserver(
 			self,
@@ -480,10 +702,26 @@ class AudioPro: RCTEventEmitter {
 
 		if autoPlay {
 			player?.play()
+
+			emitDiagnosticWithEnvelope(tag: "PLAYBACK_STATE_CHANGE", data: [
+				"state": "BUFFERING",
+				"playWhenReady": true,
+				"reason": "USER_REQUEST",
+				"positionMs": 0,
+				"durationMs": 0
+			])
 		} else {
 			DispatchQueue.main.async {
 				self.sendStateEvent(state: self.STATE_PAUSED, position: 0, duration: 0, track: self.currentTrack)
 			}
+
+			emitDiagnosticWithEnvelope(tag: "PLAYBACK_STATE_CHANGE", data: [
+				"state": STATE_PAUSED,
+				"playWhenReady": false,
+				"reason": "USER_REQUEST",
+				"positionMs": 0,
+				"durationMs": 0
+			])
 		}
 
 		DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
@@ -567,6 +805,15 @@ class AudioPro: RCTEventEmitter {
 		stopTimer()
 		sendPausedStateEvent()
 		updateNowPlayingInfo(time: player?.currentTime().seconds ?? 0, rate: 0)
+
+		let info = getPlaybackInfo()
+		emitDiagnosticWithEnvelope(tag: "PLAYBACK_STATE_CHANGE", data: [
+			"state": STATE_PAUSED,
+			"playWhenReady": false,
+			"reason": "USER_REQUEST",
+			"positionMs": info.position,
+			"durationMs": info.duration
+		])
 	}
 
 	@objc(resume)
@@ -583,13 +830,25 @@ class AudioPro: RCTEventEmitter {
 			// Continue anyway, as the play command might still work
 		}
 
+		let info = getPlaybackInfo()
+		emitDiagnosticWithEnvelope(tag: "PLAY_INTENT", data: [
+			"source": "APP",
+			"action": "ALLOWED",
+			"playerState": player?.rate == 0 ? "PAUSED" : "PLAYING"
+		])
+
 		player?.play()
+
+		emitDiagnosticWithEnvelope(tag: "PLAYBACK_STATE_CHANGE", data: [
+			"state": STATE_PLAYING,
+			"playWhenReady": true,
+			"reason": "USER_REQUEST",
+			"positionMs": info.position,
+			"durationMs": info.duration
+		])
 
 		// Ensure lock screen controls are properly updated
 		updateNowPlayingInfo(time: player?.currentTime().seconds ?? 0, rate: 1.0)
-
-		// Note: We don't need to call sendPlayingStateEvent() here because
-		// the rate change will trigger observeValue which now calls sendPlayingStateEvent()
 	}
 
 	/// stop is meant to halt playback and update the state without destroying persistent info
@@ -669,6 +928,9 @@ class AudioPro: RCTEventEmitter {
 
 		// Explicitly remove audio session interruption observer
 		removeAudioSessionInterruptionObserver()
+
+		// Remove route change observer
+		removeRouteChangeObserver()
 
 		if let player = player {
 			if isRateObserverAdded {
@@ -895,9 +1157,23 @@ class AudioPro: RCTEventEmitter {
 		isInErrorState = false
 		lastEmittedState = ""
 		shouldBePlaying = false
+		hasTrackEnded = true
 
-		player?.seek(to: .zero)
 		stopTimer()
+
+		emitDiagnosticWithEnvelope(tag: "PLAYBACK_STATE_CHANGE", data: [
+			"state": "ENDED",
+			"playWhenReady": false,
+			"reason": "END_OF_MEDIA_ITEM",
+			"positionMs": info.position,
+			"durationMs": info.duration
+		])
+
+		emitDiagnosticWithEnvelope(tag: "TRACK_DID_END", data: [
+			"hasTrackEnded": true,
+			"positionMs": info.position,
+			"durationMs": info.duration
+		])
 
 		updateNowPlayingInfo(time: 0, rate: 0)
 
@@ -1291,6 +1567,20 @@ class AudioPro: RCTEventEmitter {
 
 		commandCenter.playCommand.addTarget { [weak self] _ in
 			guard let self = self else { return .commandFailed }
+			if self.hasTrackEnded {
+				self.emitDiagnosticWithEnvelope(tag: "PLAY_INTENT", data: [
+					"source": "REMOTE",
+					"action": "BLOCKED",
+					"blockReason": "TRACK_ENDED",
+					"playerState": "ENDED"
+				])
+				return .success
+			}
+			self.emitDiagnosticWithEnvelope(tag: "PLAY_INTENT", data: [
+				"source": "REMOTE",
+				"action": "ALLOWED",
+				"playerState": self.player?.rate == 0 ? "READY" : "READY"
+			])
 			if self.player?.rate == 0 {
 				self.resume()
 				return .success
@@ -1313,6 +1603,25 @@ class AudioPro: RCTEventEmitter {
 			guard let self = self, let player = self.player else { return .commandFailed }
 
 			self.log("Magic Tap (togglePlayPause) triggered")
+
+			if self.hasTrackEnded {
+				self.emitDiagnosticWithEnvelope(tag: "PLAY_INTENT", data: [
+					"source": "REMOTE",
+					"action": "BLOCKED",
+					"blockReason": "TRACK_ENDED",
+					"playerState": "ENDED"
+				])
+				return .success
+			}
+
+			// Emit PLAY_INTENT only when toggling from paused to play
+			if player.rate == 0 {
+				self.emitDiagnosticWithEnvelope(tag: "PLAY_INTENT", data: [
+					"source": "REMOTE",
+					"action": "ALLOWED",
+					"playerState": "READY"
+				])
+			}
 
 			if player.rate > 0 {
 				// Currently playing → pause

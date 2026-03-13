@@ -3,6 +3,7 @@ package dev.rnap.reactnativeaudiopro
 import android.os.Bundle
 import androidx.annotation.OptIn
 import androidx.media3.common.MediaItem
+import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.session.CommandButton
 import androidx.media3.session.MediaLibraryService
@@ -19,22 +20,12 @@ open class AudioProMediaLibrarySessionCallback : MediaLibraryService.MediaLibrar
 
 	private val nextButton = CommandButton.Builder(CommandButton.ICON_NEXT)
 		.setDisplayName("Next")
-		.setSessionCommand(
-			SessionCommand(
-				CUSTOM_COMMAND_NEXT,
-				Bundle.EMPTY
-			)
-		)
+		.setPlayerCommand(Player.COMMAND_SEEK_TO_NEXT_MEDIA_ITEM)
 		.build()
 
 	private val prevButton = CommandButton.Builder(CommandButton.ICON_PREVIOUS)
 		.setDisplayName("Previous")
-		.setSessionCommand(
-			SessionCommand(
-				CUSTOM_COMMAND_PREV,
-				Bundle.EMPTY
-			)
-		)
+		.setPlayerCommand(Player.COMMAND_SEEK_TO_PREVIOUS_MEDIA_ITEM)
 		.build()
 
 	private val skipForwardButton = CommandButton.Builder(CommandButton.ICON_SKIP_FORWARD)
@@ -76,10 +67,6 @@ open class AudioProMediaLibrarySessionCallback : MediaLibraryService.MediaLibrar
 	}
 
 	companion object {
-		private const val CUSTOM_COMMAND_NEXT =
-			"dev.rnap.reactnativeaudiopro.NEXT"
-		private const val CUSTOM_COMMAND_PREV =
-			"dev.rnap.reactnativeaudiopro.PREV"
 		private const val CUSTOM_COMMAND_SKIP_FORWARD =
 			"dev.rnap.reactnativeaudiopro.SKIP_FORWARD"
 		private const val CUSTOM_COMMAND_SKIP_BACKWARD =
@@ -90,17 +77,10 @@ open class AudioProMediaLibrarySessionCallback : MediaLibraryService.MediaLibrar
 	val mediaNotificationSessionCommands
 		get() = MediaSession.ConnectionResult.DEFAULT_SESSION_AND_LIBRARY_COMMANDS.buildUpon()
 			.also { builder ->
-				// Add custom commands based on settings
-				if (AudioProController.settingShowNextPrevControls) {
-					// Add next and previous commands
-					builder.add(SessionCommand(CUSTOM_COMMAND_NEXT, Bundle.EMPTY))
-					builder.add(SessionCommand(CUSTOM_COMMAND_PREV, Bundle.EMPTY))
-				} else if (AudioProController.settingShowSkipControls) {
-					// Add skip forward and skip backward commands
+				if (AudioProController.settingShowSkipControls) {
 					builder.add(SessionCommand(CUSTOM_COMMAND_SKIP_FORWARD, Bundle.EMPTY))
 					builder.add(SessionCommand(CUSTOM_COMMAND_SKIP_BACKWARD, Bundle.EMPTY))
 				}
-				// If both settings are false, no custom commands are added, only default commands
 			}
 			.build()
 
@@ -123,16 +103,6 @@ open class AudioProMediaLibrarySessionCallback : MediaLibraryService.MediaLibrar
 		args: Bundle,
 	): ListenableFuture<SessionResult> {
 		when (customCommand.customAction) {
-			CUSTOM_COMMAND_NEXT -> {
-				AudioProController.emitNext()
-				return Futures.immediateFuture(SessionResult(SessionResult.RESULT_SUCCESS))
-			}
-
-			CUSTOM_COMMAND_PREV -> {
-				AudioProController.emitPrev()
-				return Futures.immediateFuture(SessionResult(SessionResult.RESULT_SUCCESS))
-			}
-
 			CUSTOM_COMMAND_SKIP_FORWARD -> {
 				AudioProController.seekForward(AudioProController.settingSkipIntervalMs)
 				return Futures.immediateFuture(SessionResult(SessionResult.RESULT_SUCCESS))
