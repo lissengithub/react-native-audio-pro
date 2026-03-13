@@ -232,10 +232,6 @@ open class AudioProPlaybackService : MediaLibraryService() {
 	 */
 	private fun removeNotificationAndStopService() {
 		try {
-			// Cancel any pending debounced detach
-			pendingDetachRunnable?.let { foregroundHandler.removeCallbacks(it) }
-			pendingDetachRunnable = null
-
 			// Remove notification directly
 			val notificationManager =
 				getSystemService(NOTIFICATION_SERVICE) as android.app.NotificationManager
@@ -400,6 +396,8 @@ open class AudioProPlaybackService : MediaLibraryService() {
 
 	private fun updateForegroundState(currentPlayer: Player) {
 		if (currentPlayer.currentMediaItem == null) {
+			pendingDetachRunnable?.let { foregroundHandler.removeCallbacks(it) }
+			pendingDetachRunnable = null
 			if (isForegroundRunning) {
 				detachForeground()
 			}
@@ -410,44 +408,11 @@ open class AudioProPlaybackService : MediaLibraryService() {
 			return
 		}
 
-		val shouldBeForeground =
-			(currentPlayer.playWhenReady &&
-				(currentPlayer.playbackState == Player.STATE_BUFFERING ||
-					currentPlayer.playbackState == Player.STATE_READY)) ||
-			(currentPlayer.playbackState == Player.STATE_ENDED &&
-				currentPlayer.currentMediaItem != null)
-
-		AudioProController.emitDiagnostic("FOREGROUND_STATE", mapOf(
-			"shouldBeForeground" to shouldBeForeground,
-			"playbackState" to stateToString(currentPlayer.playbackState),
-			"playWhenReady" to currentPlayer.playWhenReady,
-			"hasMediaItem" to (currentPlayer.currentMediaItem != null)
-		))
-
-		if (shouldBeForeground) {
-			// Cancel any pending detach — we're staying foreground
-			pendingDetachRunnable?.let { foregroundHandler.removeCallbacks(it) }
-			pendingDetachRunnable = null
-
-			if (!isForegroundRunning) {
-				promoteToForeground(currentPlayer)
-			} else {
-				postNotification(currentPlayer, ongoing = true)
-			}
-		} else {
-			// Debounce detach to avoid flicker during track transitions.
-			// Don't post a replacement notification — Media3's MediaSession
-			// handles the media notification automatically when not foreground.
-			if (isForegroundRunning && pendingDetachRunnable == null) {
-				val runnable = Runnable {
-					pendingDetachRunnable = null
-					if (isForegroundRunning) {
-						detachForeground()
-					}
-				}
-				pendingDetachRunnable = runnable
-				foregroundHandler.postDelayed(runnable, 500)
-			}
+		// Stay foreground while a media item is loaded. Only detach when
+		// media item is cleared (above) or on real teardown (onDestroy, etc).
+		// This prevents notification flicker on play/pause and track transitions.
+		if (!isForegroundRunning) {
+			promoteToForeground(currentPlayer)
 		}
 	}
 
@@ -553,6 +518,4 @@ open class AudioProPlaybackService : MediaLibraryService() {
 
 	private var isForegroundRunning: Boolean = false
 	private var lastNotificationOngoing: Boolean? = null
-	private val foregroundHandler = android.os.Handler(android.os.Looper.getMainLooper())
-	private var pendingDetachRunnable: Runnable? = null
 }
