@@ -435,20 +435,18 @@ open class AudioProPlaybackService : MediaLibraryService() {
 				postNotification(currentPlayer, ongoing = true)
 			}
 		} else {
-			// Debounce detach to avoid flicker during track transitions
+			// Debounce detach to avoid flicker during track transitions.
+			// Don't post a replacement notification — Media3's MediaSession
+			// handles the media notification automatically when not foreground.
 			if (isForegroundRunning && pendingDetachRunnable == null) {
 				val runnable = Runnable {
 					pendingDetachRunnable = null
 					if (isForegroundRunning) {
-						val p = if (::player.isInitialized) player else null
 						detachForeground()
-						postNotification(p, ongoing = false)
 					}
 				}
 				pendingDetachRunnable = runnable
 				foregroundHandler.postDelayed(runnable, 500)
-			} else if (!isForegroundRunning) {
-				postNotification(currentPlayer, ongoing = false)
 			}
 		}
 	}
