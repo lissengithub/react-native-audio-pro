@@ -830,13 +830,25 @@ class AudioPro: RCTEventEmitter {
 			// Continue anyway, as the play command might still work
 		}
 
+		let info = getPlaybackInfo()
+		emitDiagnosticWithEnvelope(tag: "PLAY_INTENT", data: [
+			"source": "APP",
+			"action": "ALLOWED",
+			"playerState": player?.rate == 0 ? "PAUSED" : "PLAYING"
+		])
+
 		player?.play()
+
+		emitDiagnosticWithEnvelope(tag: "PLAYBACK_STATE_CHANGE", data: [
+			"state": STATE_PLAYING,
+			"playWhenReady": true,
+			"reason": "USER_REQUEST",
+			"positionMs": info.position,
+			"durationMs": info.duration
+		])
 
 		// Ensure lock screen controls are properly updated
 		updateNowPlayingInfo(time: player?.currentTime().seconds ?? 0, rate: 1.0)
-
-		// Note: We don't need to call sendPlayingStateEvent() here because
-		// the rate change will trigger observeValue which now calls sendPlayingStateEvent()
 	}
 
 	/// stop is meant to halt playback and update the state without destroying persistent info
