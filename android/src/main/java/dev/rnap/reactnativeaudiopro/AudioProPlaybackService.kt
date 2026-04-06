@@ -122,6 +122,8 @@ open class AudioProPlaybackService : MediaLibraryService() {
 	private lateinit var player: ExoPlayer
 	private var wasPlayingBeforeFocusLoss: Boolean = false
 	private var audioDeviceCallback: AudioDeviceCallback? = null
+	@Volatile
+	private var resourcesReleased = false
 
 	companion object {
 		private const val NOTIFICATION_ID = 789
@@ -273,7 +275,8 @@ open class AudioProPlaybackService : MediaLibraryService() {
 		am.registerAudioDeviceCallback(callback, Handler(Looper.getMainLooper()))
 	}
 
-	override fun onGetSession(controllerInfo: ControllerInfo): MediaLibrarySession {
+	override fun onGetSession(controllerInfo: ControllerInfo): MediaLibrarySession? {
+		if (resourcesReleased || !::mediaLibrarySession.isInitialized) return null
 		return mediaLibrarySession
 	}
 
@@ -358,13 +361,35 @@ open class AudioProPlaybackService : MediaLibraryService() {
 	// stateToString is now in the companion object
 
 	/**
-	 * Called when the task is removed from the recent tasks list
-	 * This happens when the user swipes away the app from the recent apps list
+	 * Called when the task is removed from the recent tasks list.
+	 * This happens when the user swipes away the app, or when Samsung/OEM
+	 * battery optimizers remove the task.
 	 */
 	override fun onTaskRemoved(rootIntent: android.content.Intent?) {
 		android.util.Log.d("AudioProPlaybackService", "Task removed, stopping service")
 
-		// Force stop playback and release resources
+		emitDiagnosticWithEnvelope("LIFECYCLE", mapOf(
+			"callback" to "onTaskRemoved",
+			"playerState" to if (::player.isInitialized) stateToString(player.playbackState) else "NOT_INITIALIZED",
+			"playWhenReady" to if (::player.isInitialized) player.playWhenReady else false,
+			"hasMediaItem" to (::player.isInitialized && player.currentMediaItem != null)
+		))
+
+		releaseResources()
+		removeNotificationAndStopService()
+
+		super.onTaskRemoved(rootIntent)
+	}
+
+	/**
+	 * Idempotent resource release. Safe to call multiple times — only the first
+	 * call does the actual teardown. Both onTaskRemoved and onDestroy use this
+	 * to avoid double-release crashes.
+	 */
+	private fun releaseResources() {
+		if (resourcesReleased) return
+		resourcesReleased = true
+		currentMediaSession = null
 		try {
 			val hasSession = ::mediaLibrarySession.isInitialized
 			if (hasSession) {
@@ -378,13 +403,8 @@ open class AudioProPlaybackService : MediaLibraryService() {
 				mediaLibrarySession.release()
 			}
 		} catch (e: Exception) {
-			android.util.Log.e("AudioProPlaybackService", "Error stopping playback", e)
+			android.util.Log.e("AudioProPlaybackService", "Error releasing resources", e)
 		}
-
-		// Remove notification and stop service
-		removeNotificationAndStopService()
-
-		super.onTaskRemoved(rootIntent)
 	}
 
 	// MediaSession.setSessionActivity
@@ -392,7 +412,6 @@ open class AudioProPlaybackService : MediaLibraryService() {
 	@OptIn(UnstableApi::class)
 	override fun onDestroy() {
 		android.util.Log.d("AudioProPlaybackService", "Service being destroyed")
-		currentMediaSession = null
 
 		// Unregister audio device callback
 		audioDeviceCallback?.let { callback ->
@@ -402,24 +421,12 @@ open class AudioProPlaybackService : MediaLibraryService() {
 		}
 		audioManagerRef = null
 
-		// Make sure to release all resources
+		releaseResources()
+
 		try {
-			val hasSession = ::mediaLibrarySession.isInitialized
-			if (hasSession) {
-				// Stop playback first
-				mediaLibrarySession.player.stop()
-			}
-			if (::player.isInitialized) {
-				player.removeListener(playbackListener)
-				player.release()
-			}
-			if (hasSession) {
-				// Release session after tearing down the player
-				mediaLibrarySession.release()
-			}
 			clearListener()
 		} catch (e: Exception) {
-			android.util.Log.e("AudioProPlaybackService", "Error during service destruction", e)
+			android.util.Log.e("AudioProPlaybackService", "Error clearing listener", e)
 		}
 
 		// Remove notification
@@ -560,6 +567,7 @@ open class AudioProPlaybackService : MediaLibraryService() {
 					}
 				}
 		currentMediaSession = mediaLibrarySession
+		resourcesReleased = false
 
 		updateForegroundState(player)
 	}
