@@ -145,19 +145,39 @@ class AudioProModule(private val reactContext: ReactApplicationContext) :
 	}
 
 	override fun onHostDestroy() {
-		if (!reactContext.hasActiveCatalystInstance()) {
-			Log.d("[react-native-audio-pro]", "App is being destroyed, clearing playback")
-			AudioProController.clear()
+		val hasActiveCatalyst = try { reactContext.hasActiveCatalystInstance() } catch (_: Exception) { false }
+		Log.d("[react-native-audio-pro]", "onHostDestroy called, hasActiveCatalyst=$hasActiveCatalyst")
+		try {
+			AudioProPlaybackService.emitDiagnosticWithEnvelope("LIFECYCLE", mapOf(
+				"callback" to "onHostDestroy",
+				"hasActiveCatalystInstance" to hasActiveCatalyst
+			))
+		} catch (_: Exception) {}
+		// Do NOT call clear() here — the host activity being destroyed does not mean
+		// playback should stop. The foreground service owns playback lifetime.
+		// Ambient audio can be stopped since it's UI-tied (only if catalyst is gone).
+		if (!hasActiveCatalyst) {
 			AudioProAmbientController.ambientStop()
 		}
 	}
 
 	override fun onCatalystInstanceDestroy() {
-		Log.d("AudioProModule", "React Native bridge is being destroyed, clearing playback")
-		AudioProController.clear()
+		Log.d("AudioProModule", "React Native bridge is being destroyed")
+		try {
+			AudioProPlaybackService.emitDiagnosticWithEnvelope("LIFECYCLE", mapOf(
+				"callback" to "onCatalystInstanceDestroy"
+			))
+		} catch (_: Exception) {}
+		// Do NOT call clear() here — the bridge being destroyed does not mean
+		// playback should stop. The foreground service owns playback lifetime.
 		AudioProAmbientController.ambientStop()
 
-		// Explicitly null out context references
+		// Release the controller-side MediaBrowser (doesn't affect the service/playback).
+		// This detaches listeners that would fire into a null context.
+		// A fresh browser is created on next play().
+		AudioProController.release()
+
+		// Detach context references but leave the service running
 		AudioProController.setReactContext(null)
 		AudioProAmbientController.setReactContext(null)
 
