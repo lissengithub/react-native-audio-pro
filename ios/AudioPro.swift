@@ -87,6 +87,7 @@ class AudioPro: RCTEventEmitter {
 
 	private var currentAsset: AVURLAsset? = nil
 	private var retryCount: Int = 0
+	private var hasRetriedForLocalStall: Bool = false
 
 	// JS-configurable buffer/retry settings
 	// Note: iOS only uses maxBufferMs (via preferredForwardBufferDuration).
@@ -516,6 +517,7 @@ class AudioPro: RCTEventEmitter {
 		isInErrorState = false
 		// Reset last emitted state when playing a new track
 		lastEmittedState = ""
+		hasRetriedForLocalStall = false
 		currentTrack = track
 		settingDebug = options["debug"] as? Bool ?? false
 		settingDebugIncludeProgress = options["debugIncludesProgress"] as? Bool ?? false
@@ -559,6 +561,7 @@ class AudioPro: RCTEventEmitter {
 			return
 		}
 
+		let isLocalFile = url.isFileURL
 		let artworkUrlString = track["artwork"] as? String ?? ""
 		let artworkUrl: URL? = artworkUrlString.isEmpty ? nil : URL(string: artworkUrlString)
 
@@ -659,7 +662,8 @@ class AudioPro: RCTEventEmitter {
 			"playerState": "BUFFERING"
 		])
 
-		player?.automaticallyWaitsToMinimizeStalling = true
+		// Local files don't need buffering evaluation — the entire file is on disk.
+		player?.automaticallyWaitsToMinimizeStalling = !isLocalFile
 
 		// Add rate observer to the player
 		player?.addObserver(self, forKeyPath: "rate", options: [.new], context: nil)
@@ -733,13 +737,23 @@ class AudioPro: RCTEventEmitter {
 
 			guard let player = self.player, self.hasListeners else { return }
 
+			let info = self.getPlaybackInfo()
+
+			// Local file with duration=0 at 100ms means metadata failed to load.
+			// A local file's metadata loads in microseconds — 0 at this point is broken.
+			if isLocalFile && info.duration == 0 && !self.hasRetriedForLocalStall {
+				self.log("Local file stall: duration=0 at 100ms check, retrying")
+				self.hasRetriedForLocalStall = true
+				self.retryWithCurrentAsset()
+				return
+			}
+
 			// Use timeControlStatus instead of rate to avoid emitting PLAYING while buffering
 			if player.timeControlStatus == .playing {
 				self.sendPlayingStateEvent()
 				self.startProgressTimer()
 			} else if player.timeControlStatus == .waitingToPlayAtSpecifiedRate {
 				self.log("Delayed check: still buffering, emitting LOADING")
-				let info = self.getPlaybackInfo()
 				self.sendStateEvent(state: self.STATE_LOADING, position: info.position, duration: info.duration, track: info.track)
 			}
 		}
