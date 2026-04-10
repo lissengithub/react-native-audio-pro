@@ -550,7 +550,6 @@ class AudioPro: RCTEventEmitter {
 		currentPlaybackSpeed = speed
 		activeVolume = volume
 		log("Play", track["title"] ?? "Unknown", "speed:", speed, "volume:", volume, "autoPlay:", autoPlay)
-		alwaysLog("play", track["title"] ?? "Unknown", "url:", urlString.prefix(80))
 
 		if player != nil {
 			DispatchQueue.main.sync {
@@ -570,6 +569,7 @@ class AudioPro: RCTEventEmitter {
 		}
 
 		let isLocalFile = url.isFileURL
+		alwaysLog("play", track["title"] ?? "Unknown", "isLocal:", isLocalFile)
 		let artworkUrlString = track["artwork"] as? String ?? ""
 		let artworkUrl: URL? = artworkUrlString.isEmpty ? nil : URL(string: artworkUrlString)
 
