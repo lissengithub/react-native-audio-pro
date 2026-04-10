@@ -87,6 +87,7 @@ class AudioPro: RCTEventEmitter {
 
 	private var currentAsset: AVURLAsset? = nil
 	private var retryCount: Int = 0
+	private var hasRetriedForLocalStall: Bool = false
 
 	// JS-configurable buffer/retry settings
 	// Note: iOS only uses maxBufferMs (via preferredForwardBufferDuration).
@@ -326,6 +327,13 @@ class AudioPro: RCTEventEmitter {
 		print("~~~ [AudioPro]", items.map { "\($0)" }.joined(separator: " "))
 	}
 
+	/// Always-on logging visible in Console.app for release builds.
+	/// Use for key lifecycle events and error recovery — not for high-frequency progress.
+	private func alwaysLog(_ items: Any...) {
+		let msg = items.map { "\($0)" }.joined(separator: " ")
+		NSLog("[AudioPro] %@", msg)
+	}
+
 	private func sendDiagnosticEvent(tag: String, data: [String: Any]) {
 		guard hasListeners else { return }
 		let payload: [String: Any] = ["tag": tag, "data": data]
@@ -516,6 +524,7 @@ class AudioPro: RCTEventEmitter {
 		isInErrorState = false
 		// Reset last emitted state when playing a new track
 		lastEmittedState = ""
+		hasRetriedForLocalStall = false
 		currentTrack = track
 		settingDebug = options["debug"] as? Bool ?? false
 		settingDebugIncludeProgress = options["debugIncludesProgress"] as? Bool ?? false
@@ -559,6 +568,8 @@ class AudioPro: RCTEventEmitter {
 			return
 		}
 
+		let isLocalFile = url.isFileURL
+		alwaysLog("play", track["title"] ?? "Unknown", "isLocal:", isLocalFile)
 		let artworkUrlString = track["artwork"] as? String ?? ""
 		let artworkUrl: URL? = artworkUrlString.isEmpty ? nil : URL(string: artworkUrlString)
 
@@ -659,7 +670,8 @@ class AudioPro: RCTEventEmitter {
 			"playerState": "BUFFERING"
 		])
 
-		player?.automaticallyWaitsToMinimizeStalling = true
+		// Local files don't need buffering evaluation — the entire file is on disk.
+		player?.automaticallyWaitsToMinimizeStalling = !isLocalFile
 
 		// Add rate observer to the player
 		player?.addObserver(self, forKeyPath: "rate", options: [.new], context: nil)
@@ -733,13 +745,34 @@ class AudioPro: RCTEventEmitter {
 
 			guard let player = self.player, self.hasListeners else { return }
 
+			let info = self.getPlaybackInfo()
+
+			// Local file: two stall scenarios we detect at 100ms.
+			// A local file's data is on disk — it should be playing by now.
+			if isLocalFile && !self.hasRetriedForLocalStall {
+				// Case 1: timeControlStatus says "playing" but duration=0 → metadata never loaded
+				// Case 2: timeControlStatus != .playing → player stuck buffering/waiting
+				let isStalled = (player.timeControlStatus == .playing && info.duration == 0)
+					|| player.timeControlStatus != .playing
+
+				if isStalled {
+					self.alwaysLog("localFileStall: status=\(player.timeControlStatus.rawValue) dur=\(info.duration), pause+play to recover")
+					self.hasRetriedForLocalStall = true
+					player.pause()
+					player.play()
+					if self.currentPlaybackSpeed != 1.0 {
+						player.rate = self.currentPlaybackSpeed
+					}
+					return
+				}
+			}
+
 			// Use timeControlStatus instead of rate to avoid emitting PLAYING while buffering
 			if player.timeControlStatus == .playing {
 				self.sendPlayingStateEvent()
 				self.startProgressTimer()
 			} else if player.timeControlStatus == .waitingToPlayAtSpecifiedRate {
-				self.log("Delayed check: still buffering, emitting LOADING")
-				let info = self.getPlaybackInfo()
+				self.alwaysLog("delayedCheck: still buffering, emitting LOADING")
 				self.sendStateEvent(state: self.STATE_LOADING, position: info.position, duration: info.duration, track: info.track)
 			}
 		}
@@ -800,6 +833,7 @@ class AudioPro: RCTEventEmitter {
 
 	@objc(pause)
 	func pause() {
+		alwaysLog("pause")
 		shouldBePlaying = false
 		player?.pause()
 		stopTimer()
@@ -818,6 +852,7 @@ class AudioPro: RCTEventEmitter {
 
 	@objc(resume)
 	func resume() {
+		alwaysLog("resume")
 		shouldBePlaying = true
 
 		// Try to reactivate the audio session if needed
@@ -1153,6 +1188,7 @@ class AudioPro: RCTEventEmitter {
 		}
 
 		let info = getPlaybackInfo()
+		alwaysLog("trackEnded pos:", info.position, "dur:", info.duration)
 
 		isInErrorState = false
 		lastEmittedState = ""
@@ -1250,7 +1286,7 @@ class AudioPro: RCTEventEmitter {
 				stopTimer()
 			case .waitingToPlayAtSpecifiedRate:
 				// AVPlayer is buffering / waiting for network
-				log("timeControlStatus: waitingToPlayAtSpecifiedRate, reason: \(String(describing: player.reasonForWaitingToPlay))")
+				alwaysLog("timeControlStatus: waitingToPlay, reason:", String(describing: player.reasonForWaitingToPlay))
 				let info = getPlaybackInfo()
 				sendStateEvent(state: STATE_LOADING, position: info.position, duration: info.duration, track: info.track)
 				stopTimer()
@@ -1317,6 +1353,7 @@ class AudioPro: RCTEventEmitter {
 			"position": info.position,
 			"duration": info.duration
 		]
+		alwaysLog("state:", state, "pos:", info.position, "dur:", info.duration)
 		sendEvent(type: EVENT_TYPE_STATE_CHANGED, track: info.track ?? track, payload: payload)
 
 		// Track the last emitted state
@@ -1501,6 +1538,7 @@ class AudioPro: RCTEventEmitter {
 	 * For non-critical errors that don't require state transition, use emitPlaybackError() instead.
 	 */
 	func onError(_ errorMessage: String, code: Int = AudioPro.GENERIC_ERROR_CODE) {
+		alwaysLog("ERROR code:", code, "msg:", errorMessage)
 		// If we're already in an error state, just log and return
 		if isInErrorState {
 			log("Already in error state, ignoring additional error: \(errorMessage)")
