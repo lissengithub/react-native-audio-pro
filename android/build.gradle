@@ -79,6 +79,13 @@ dependencies {
 	implementation "org.jetbrains.kotlin:kotlin-stdlib:$kotlin_version"
 
 	implementation "androidx.media3:media3-exoplayer:1.6.0"
+	// HLS playback support. Media3 is modular: the core exoplayer artifact cannot
+	// parse .m3u8 at all — DefaultMediaSourceFactory discovers HlsMediaSource by
+	// reflection ONLY if this artifact is on the classpath. Until now the host app
+	// happened to inherit it transitively from another SDK, which meant HLS
+	// playback depended on a dependency we never declared. Keep the version locked
+	// to the other media3 artifacts.
+	implementation "androidx.media3:media3-exoplayer-hls:1.6.0"
 	implementation "androidx.media3:media3-session:1.6.0"
 	implementation "androidx.media3:media3-common:1.6.0"
 	implementation "androidx.media3:media3-common-ktx:1.6.0"

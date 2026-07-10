@@ -1031,10 +1031,20 @@ class AudioPro: RCTEventEmitter {
 			return
 		}
 
-		// For all seeks, we need valid duration
-		if duration.isNaN || duration.isInfinite {
-			onError("Cannot seek: invalid track duration")
-			return
+		// For all seeks, we need a usable duration. AVPlayer resolves the stream
+		// duration a beat AFTER playback starts for some valid HLS shapes
+		// (observed with single-file byte-range fMP4), so an early seek used to
+		// hard-fail here. Fall back to the track's metadata durationMs (supplied
+		// by the JS caller) so the seek degrades gracefully; only error when
+		// neither the player nor the metadata knows the duration.
+		var effectiveDuration = duration
+		if effectiveDuration.isNaN || effectiveDuration.isInfinite || effectiveDuration <= 0 {
+			if let metadataMs = (currentTrack?["durationMs"] as? NSNumber)?.doubleValue, metadataMs > 0 {
+				effectiveDuration = metadataMs / 1000.0
+			} else {
+				onError("Cannot seek: invalid track duration")
+				return
+			}
 		}
 
 		stopTimer()
@@ -1047,12 +1057,12 @@ class AudioPro: RCTEventEmitter {
 		} else {
 			// For seekForward/Back, position is the amount in ms
 			let amountInSeconds = position / 1000.0
-			targetPosition = (position >= 0) ? min(currentTime + amountInSeconds, duration) :
+			targetPosition = (position >= 0) ? min(currentTime + amountInSeconds, effectiveDuration) :
 											  max(0, currentTime + amountInSeconds)
 		}
 
 		// Ensure position is within valid range
-		let validPosition = max(0, min(targetPosition, duration))
+		let validPosition = max(0, min(targetPosition, effectiveDuration))
 		let time = CMTime(seconds: validPosition, preferredTimescale: 1000)
 		let targetPositionMs = validPosition * 1000
 		let completionToleranceSeconds = 0.05 // Allow small drift when AVPlayer reports interrupted completion
