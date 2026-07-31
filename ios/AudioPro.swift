@@ -62,6 +62,7 @@ class AudioPro: RCTEventEmitter {
 
 	private var currentPlaybackSpeed: Float = 1.0
 	private var currentTrack: NSDictionary?
+	private var playbackGeneration = UUID()
 
 	private var settingDebug: Bool = false
 	private var settingDebugIncludeProgress: Bool = false
@@ -526,6 +527,8 @@ class AudioPro: RCTEventEmitter {
 		lastEmittedState = ""
 		hasRetriedForLocalStall = false
 		currentTrack = track
+		let playbackGeneration = UUID()
+		self.playbackGeneration = playbackGeneration
 		settingDebug = options["debug"] as? Bool ?? false
 		settingDebugIncludeProgress = options["debugIncludesProgress"] as? Bool ?? false
 		let speed = Float(options["playbackSpeed"] as? Double ?? 1.0)
@@ -596,8 +599,9 @@ class AudioPro: RCTEventEmitter {
 		let album = track["album"] as? String
 		let artist = track["artist"] as? String
 
-		// Update now playing info without resetting the entire dictionary
-		var nowPlayingInfo = MPNowPlayingInfoCenter.default().nowPlayingInfo ?? [String: Any]()
+		// Publish a fresh payload for every track. Reusing the previous dictionary can
+		// leave stale title, artwork, album, or duration values on the lock screen.
+		var nowPlayingInfo = [String: Any]()
 		nowPlayingInfo[MPMediaItemPropertyTitle] = title
 		if let album = album {
 			nowPlayingInfo[MPMediaItemPropertyAlbumTitle] = album
@@ -605,6 +609,11 @@ class AudioPro: RCTEventEmitter {
 		if let artist = artist {
 			nowPlayingInfo[MPMediaItemPropertyArtist] = artist
 		}
+		if let trackId = track["id"] as? String {
+			nowPlayingInfo[MPNowPlayingInfoPropertyExternalContentIdentifier] = trackId
+		}
+		nowPlayingInfo[MPNowPlayingInfoPropertyElapsedPlaybackTime] = 0
+		nowPlayingInfo[MPNowPlayingInfoPropertyPlaybackRate] = autoPlay ? Double(speed) : 0
 		MPNowPlayingInfoCenter.default().nowPlayingInfo = nowPlayingInfo
 
 		// Set up remote transport controls only if they haven't been set up yet
@@ -683,12 +692,6 @@ class AudioPro: RCTEventEmitter {
 
 		// Set up volume to ensure it's applied before playback starts
 		player?.volume = activeVolume
-
-		nowPlayingInfo = MPNowPlayingInfoCenter.default().nowPlayingInfo ?? [:]
-		nowPlayingInfo[MPNowPlayingInfoPropertyElapsedPlaybackTime] = 0
-		nowPlayingInfo[MPNowPlayingInfoPropertyPlaybackRate] = 1.0
-		// Duration is set asynchronously via progress events once the player item loads
-		MPNowPlayingInfoCenter.default().nowPlayingInfo = nowPlayingInfo
 
 		// Remove any existing track-end observer before adding a new one
 		if let oldItem = player?.currentItem, oldItem !== item {
@@ -779,8 +782,6 @@ class AudioPro: RCTEventEmitter {
 
 		// Fetch artwork asynchronously - skip if no URL provided
 		if let artworkUrl = artworkUrl {
-			let capturedTrack = currentTrack
-
 			let artworkTimeoutSeconds: TimeInterval = 10.0
 			let config = URLSessionConfiguration.default
 			config.timeoutIntervalForRequest = artworkTimeoutSeconds
@@ -804,7 +805,7 @@ class AudioPro: RCTEventEmitter {
 				guard let self = self else { return }
 
 				// Skip if track changed while artwork was loading
-				guard self.currentTrack === capturedTrack else {
+				guard self.playbackGeneration == playbackGeneration else {
 					self.log("Artwork fetch completed for stale track, skipping")
 					return
 				}
@@ -823,6 +824,12 @@ class AudioPro: RCTEventEmitter {
 
 				let mpmArtwork = MPMediaItemArtwork(boundsSize: image.size) { _ in image }
 				DispatchQueue.main.async {
+					// The track can change after the network callback's first guard but
+					// before this main-queue update executes.
+					guard self.playbackGeneration == playbackGeneration else {
+						self.log("Artwork update queued for stale track, skipping")
+						return
+					}
 					var currentInfo = MPNowPlayingInfoCenter.default().nowPlayingInfo ?? [String: Any]()
 					currentInfo[MPMediaItemPropertyArtwork] = mpmArtwork
 					MPNowPlayingInfoCenter.default().nowPlayingInfo = currentInfo
