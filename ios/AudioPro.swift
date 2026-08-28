@@ -99,6 +99,8 @@ class AudioPro: RCTEventEmitter {
 	private var stalledPlaybackGeneration: UUID? = nil
 	private var stalledPositionMs = 0
 	private var stallRecoveryWorkItem: DispatchWorkItem? = nil
+	private var isPlaybackStallRecoveryInFlight = false
+	private var stallRecoveryStartPositionMs = 0
 
 	// JS-configurable buffer/retry settings
 	// Note: iOS only uses maxBufferMs (via preferredForwardBufferDuration).
@@ -297,7 +299,7 @@ class AudioPro: RCTEventEmitter {
 	}
 
 	private func clearPlaybackStall(emitRecovered: Bool) {
-		guard isPlaybackStallPending else { return }
+		guard isPlaybackStallPending || isPlaybackStallRecoveryInFlight else { return }
 		stallRecoveryWorkItem?.cancel()
 		stallRecoveryWorkItem = nil
 		if emitRecovered {
@@ -305,12 +307,17 @@ class AudioPro: RCTEventEmitter {
 			emitDiagnosticWithEnvelope(tag: "PLAYBACK_STALL_RECOVERED", data: [
 				"positionMs": info.position,
 				"durationMs": info.duration,
+				"stalledPositionMs": isPlaybackStallRecoveryInFlight
+					? stallRecoveryStartPositionMs
+					: stalledPositionMs,
 				"recoveryAttempt": retryCount
 			])
 		}
 		isPlaybackStallPending = false
 		stalledPlaybackGeneration = nil
 		stalledPositionMs = 0
+		isPlaybackStallRecoveryInFlight = false
+		stallRecoveryStartPositionMs = 0
 	}
 
 	@objc private func handleAudioSessionRouteChange(_ notification: Notification) {
@@ -1658,6 +1665,8 @@ class AudioPro: RCTEventEmitter {
 		let recoveryGeneration = playbackGeneration
 		retryCount += 1
 		clearPlaybackStall(emitRecovered: false)
+		isPlaybackStallRecoveryInFlight = true
+		stallRecoveryStartPositionMs = recoveryPositionMs
 
 		emitDiagnosticWithEnvelope(tag: "PLAYBACK_STALL_RECOVERY_ATTEMPT", data: [
 			"positionMs": recoveryPositionMs,
