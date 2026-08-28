@@ -1710,7 +1710,9 @@ class AudioPro: RCTEventEmitter {
 	}
 
 	private func retryWithCurrentAsset() {
-		guard let asset = currentAsset, let player = player else {
+		guard let asset = currentAsset,
+			  let url = currentAssetURL,
+			  let player = player else {
 			log("Cannot retry: no asset or player available")
 			return
 		}
@@ -1738,8 +1740,17 @@ class AudioPro: RCTEventEmitter {
 				self.isStatusObserverAdded = false
 			}
 
-			// Create fresh AVPlayerItem from same AVURLAsset (preserves custom headers)
-			let newItem = AVPlayerItem(asset: asset)
+			// A failed AVURLAsset may keep its failed resource-loader state even after
+			// connectivity returns. Recreate the asset as well as the item so every
+			// retry performs a genuinely fresh request while preserving headers.
+			let retryAsset: AVURLAsset
+			if let headers = self.currentAudioHeaders, !headers.isEmpty {
+				retryAsset = AVURLAsset(url: url, options: ["AVURLAssetHTTPHeaderFieldsKey": headers])
+			} else {
+				retryAsset = AVURLAsset(url: url)
+			}
+			self.currentAsset = retryAsset
+			let newItem = AVPlayerItem(asset: retryAsset)
 			newItem.preferredForwardBufferDuration = AudioPro.configMaxBufferMs / 1000.0
 
 			// Add KVO to new item
