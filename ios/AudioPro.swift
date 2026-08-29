@@ -2,6 +2,7 @@ import Foundation
 import AVFoundation
 import React
 import MediaPlayer
+import Network
 import UIKit
 
 @objc(AudioPro)
@@ -87,8 +88,19 @@ class AudioPro: RCTEventEmitter {
 	private var settingSkipIntervalMs: Double = 30000.0
 
 	private var currentAsset: AVURLAsset? = nil
+	private var currentAssetURL: URL? = nil
+	private var currentAudioHeaders: [String: String]? = nil
 	private var retryCount: Int = 0
 	private var hasRetriedForLocalStall: Bool = false
+	private let networkMonitor = NWPathMonitor()
+	private let networkMonitorQueue = DispatchQueue(label: "AudioPro.NetworkMonitor")
+	private var isNetworkAvailable = true
+	private var isPlaybackStallPending = false
+	private var stalledPlaybackGeneration: UUID? = nil
+	private var stalledPositionMs = 0
+	private var stallRecoveryWorkItem: DispatchWorkItem? = nil
+	private var isPlaybackStallRecoveryInFlight = false
+	private var stallRecoveryStartPositionMs = 0
 
 	// JS-configurable buffer/retry settings
 	// Note: iOS only uses maxBufferMs (via preferredForwardBufferDuration).
@@ -96,6 +108,21 @@ class AudioPro: RCTEventEmitter {
 	private static var configMaxBufferMs: Double = 120_000
 	private static var configMaxRetries: Int = 5
 	private static var configRetryBackoffMs: Double = 1000
+	private static let playbackStallGraceSeconds: TimeInterval = 10
+
+	override init() {
+		super.init()
+		networkMonitor.pathUpdateHandler = { [weak self] path in
+			DispatchQueue.main.async {
+				self?.handleNetworkPathChange(isAvailable: path.status == .satisfied)
+			}
+		}
+		networkMonitor.start(queue: networkMonitorQueue)
+	}
+
+	deinit {
+		networkMonitor.cancel()
+	}
 
 	////////////////////////////////////////////////////////////
 	// MARK: - React Native Event Emitter Overrides
@@ -159,6 +186,153 @@ class AudioPro: RCTEventEmitter {
 			object: nil
 		)
 		isRouteObserverRegistered = false
+	}
+
+	private func observePlaybackNotifications(for item: AVPlayerItem) {
+		NotificationCenter.default.addObserver(
+			self,
+			selector: #selector(playerItemDidPlayToEndTime(_:)),
+			name: .AVPlayerItemDidPlayToEndTime,
+			object: item
+		)
+		NotificationCenter.default.addObserver(
+			self,
+			selector: #selector(playerItemPlaybackStalled(_:)),
+			name: .AVPlayerItemPlaybackStalled,
+			object: item
+		)
+	}
+
+	private func removePlaybackNotifications(for item: AVPlayerItem?) {
+		guard let item = item else { return }
+		NotificationCenter.default.removeObserver(self, name: .AVPlayerItemDidPlayToEndTime, object: item)
+		NotificationCenter.default.removeObserver(self, name: .AVPlayerItemPlaybackStalled, object: item)
+	}
+
+	@objc private func playerItemPlaybackStalled(_ notification: Notification) {
+		// Apple may deliver this notification off the registration thread. Keep
+		// all player state and recovery coordination on the main queue.
+		DispatchQueue.main.async { [weak self] in
+			guard let self = self,
+				  let stalledItem = notification.object as? AVPlayerItem,
+				  stalledItem === self.player?.currentItem,
+				  self.shouldBePlaying else { return }
+
+			let info = self.getPlaybackInfo()
+			self.isPlaybackStallPending = true
+			self.stalledPlaybackGeneration = self.playbackGeneration
+			self.stalledPositionMs = info.position
+			self.stopTimer()
+			self.updateNowPlayingInfo(time: Double(info.position) / 1000.0, rate: 0)
+			self.sendStateEvent(
+				state: self.STATE_LOADING,
+				position: info.position,
+				duration: info.duration,
+				track: info.track
+			)
+
+			var diagnostic: [String: Any] = [
+				"positionMs": info.position,
+				"durationMs": info.duration,
+				"bufferedPositionMs": self.getBufferedPositionMs(for: stalledItem),
+				"networkAvailable": self.isNetworkAvailable,
+				"waitingReason": self.player?.reasonForWaitingToPlay?.rawValue ?? "UNKNOWN"
+			]
+			if let access = stalledItem.accessLog()?.events.last {
+				diagnostic["numberOfStalls"] = access.numberOfStalls
+				diagnostic["numberOfMediaRequests"] = access.numberOfMediaRequests
+				diagnostic["observedBitrate"] = access.observedBitrate
+				diagnostic["indicatedBitrate"] = access.indicatedBitrate
+				diagnostic["transferDuration"] = access.transferDuration
+			}
+			if let error = stalledItem.errorLog()?.events.last {
+				diagnostic["errorDomain"] = error.errorDomain
+				diagnostic["errorStatusCode"] = error.errorStatusCode
+			}
+			self.emitDiagnosticWithEnvelope(tag: "PLAYBACK_STALLED", data: diagnostic)
+
+			if self.isNetworkAvailable {
+				self.schedulePlaybackStallCircuitBreaker()
+			} else {
+				self.emitPlaybackStallWaitingForNetwork()
+			}
+		}
+	}
+
+	private func emitPlaybackStallWaitingForNetwork() {
+		emitDiagnosticWithEnvelope(tag: "PLAYBACK_STALL_WAITING_FOR_NETWORK", data: [
+			"positionMs": stalledPositionMs,
+			"recoveryAttempt": retryCount
+		])
+	}
+
+	private func emitPlaybackStallRecoveryAttempt(positionMs: Int, attempt: Int, trigger: String) {
+		emitDiagnosticWithEnvelope(tag: "PLAYBACK_STALL_RECOVERY_ATTEMPT", data: [
+			"positionMs": positionMs,
+			"attempt": attempt,
+			"trigger": trigger
+		])
+	}
+
+	private func handleNetworkPathChange(isAvailable: Bool) {
+		let wasAvailable = isNetworkAvailable
+		isNetworkAvailable = isAvailable
+		guard isPlaybackStallPending else { return }
+
+		if !isAvailable {
+			stallRecoveryWorkItem?.cancel()
+			stallRecoveryWorkItem = nil
+			emitPlaybackStallWaitingForNetwork()
+			return
+		}
+
+		if !wasAvailable {
+			recoverStalledPlayback(trigger: "NETWORK_RESTORED")
+		} else if stallRecoveryWorkItem == nil {
+			schedulePlaybackStallCircuitBreaker()
+		}
+	}
+
+	private func schedulePlaybackStallCircuitBreaker() {
+		guard isPlaybackStallPending, stallRecoveryWorkItem == nil else { return }
+		let generation = playbackGeneration
+		let workItem = DispatchWorkItem { [weak self] in
+			guard let self = self else { return }
+			self.stallRecoveryWorkItem = nil
+			guard self.isPlaybackStallPending,
+				  self.stalledPlaybackGeneration == generation,
+				  self.isNetworkAvailable,
+				  self.shouldBePlaying,
+				  self.player?.timeControlStatus != .playing else { return }
+			self.recoverStalledPlayback(trigger: "CIRCUIT_BREAKER")
+		}
+		stallRecoveryWorkItem = workItem
+		DispatchQueue.main.asyncAfter(
+			deadline: .now() + AudioPro.playbackStallGraceSeconds,
+			execute: workItem
+		)
+	}
+
+	private func clearPlaybackStall(emitRecovered: Bool) {
+		guard isPlaybackStallPending || isPlaybackStallRecoveryInFlight else { return }
+		stallRecoveryWorkItem?.cancel()
+		stallRecoveryWorkItem = nil
+		if emitRecovered {
+			let info = getPlaybackInfo()
+			emitDiagnosticWithEnvelope(tag: "PLAYBACK_STALL_RECOVERED", data: [
+				"positionMs": info.position,
+				"durationMs": info.duration,
+				"stalledPositionMs": isPlaybackStallRecoveryInFlight
+					? stallRecoveryStartPositionMs
+					: stalledPositionMs,
+				"recoveryAttempt": retryCount
+			])
+		}
+		isPlaybackStallPending = false
+		stalledPlaybackGeneration = nil
+		stalledPositionMs = 0
+		isPlaybackStallRecoveryInFlight = false
+		stallRecoveryStartPositionMs = 0
 	}
 
 	@objc private func handleAudioSessionRouteChange(_ notification: Notification) {
@@ -285,15 +459,23 @@ class AudioPro: RCTEventEmitter {
 					try AVAudioSession.sharedInstance().setActive(true, options: .notifyOthersOnDeactivation)
 
 					// Resume playback — timeControlStatus observer will emit
-				// PLAYING once audio is actually flowing, or LOADING if rebuffering
+					// PLAYING once audio is actually flowing, or LOADING if rebuffering.
 					player?.play()
+					let presentation = PlaybackRecoveryPolicy.resumePresentation(
+						isActuallyPlaying: player?.timeControlStatus == .playing,
+						playbackSpeed: currentPlaybackSpeed
+					)
 
-					// Update now playing info
-					updateNowPlayingInfo(time: player?.currentTime().seconds ?? 0, rate: 1.0)
+					// CarPlay must reflect actual transport state. KVO updates this
+					// again when playback starts flowing after any rebuffering.
+					updateNowPlayingInfo(
+						time: player?.currentTime().seconds ?? 0,
+						rate: presentation.nowPlayingRate
+					)
 
 					let info = getPlaybackInfo()
 					emitDiagnosticWithEnvelope(tag: "PLAYBACK_STATE_CHANGE", data: [
-						"state": STATE_PLAYING,
+						"state": presentation.isActuallyPlaying ? STATE_PLAYING : "BUFFERING",
 						"playWhenReady": true,
 						"reason": "INTERRUPTION",
 						"positionMs": info.position,
@@ -453,17 +635,17 @@ class AudioPro: RCTEventEmitter {
 		}
 	}
 
+	private func getBufferedPositionMs(for item: AVPlayerItem) -> Int {
+		guard let timeRange = item.loadedTimeRanges.last?.timeRangeValue else { return 0 }
+		let bufferedEnd = CMTimeGetSeconds(CMTimeRangeGetEnd(timeRange))
+		guard !bufferedEnd.isNaN && !bufferedEnd.isInfinite else { return 0 }
+		return max(0, Int(round(bufferedEnd * 1000)))
+	}
+
 	private func sendProgressNoticeEvent() {
 		guard let player = player, let currentItem = player.currentItem, player.rate != 0 else { return }
 		let info = getPlaybackInfo()
-
-		var bufferedPositionMs: Int = 0
-		if let timeRange = currentItem.loadedTimeRanges.last?.timeRangeValue {
-			let bufferedEnd = CMTimeGetSeconds(CMTimeRangeGetEnd(timeRange))
-			if !bufferedEnd.isNaN && !bufferedEnd.isInfinite {
-				bufferedPositionMs = Int(round(bufferedEnd * 1000))
-			}
-		}
+		let bufferedPositionMs = getBufferedPositionMs(for: currentItem)
 
 		let payload: [String: Any] = [
 			"position": info.position,
@@ -485,6 +667,7 @@ class AudioPro: RCTEventEmitter {
 	/// - Does not emit any state or clear currentTrack
 	/// - Does not destroy the media session
 	private func prepareForNewPlayback() {
+		clearPlaybackStall(emitRecovered: false)
 		// Pause the player if it's playing
 		player?.pause()
 
@@ -507,8 +690,7 @@ class AudioPro: RCTEventEmitter {
 			}
 		}
 
-		// Remove playback ended notification observer
-		NotificationCenter.default.removeObserver(self, name: .AVPlayerItemDidPlayToEndTime, object: player?.currentItem)
+		removePlaybackNotifications(for: player?.currentItem)
 	}
 
 	@objc(configure:)
@@ -572,6 +754,7 @@ class AudioPro: RCTEventEmitter {
 		}
 
 		let isLocalFile = url.isFileURL
+		currentAssetURL = url
 		alwaysLog("play", track["title"] ?? "Unknown", "isLocal:", isLocalFile)
 		let artworkUrlString = track["artwork"] as? String ?? ""
 		let artworkUrl: URL? = artworkUrlString.isEmpty ? nil : URL(string: artworkUrlString)
@@ -613,7 +796,9 @@ class AudioPro: RCTEventEmitter {
 			nowPlayingInfo[MPNowPlayingInfoPropertyExternalContentIdentifier] = trackId
 		}
 		nowPlayingInfo[MPNowPlayingInfoPropertyElapsedPlaybackTime] = 0
-		nowPlayingInfo[MPNowPlayingInfoPropertyPlaybackRate] = autoPlay ? Double(speed) : 0
+		// CarPlay extrapolates elapsed time from this value. The item is still
+		// loading here, so keep the rate at 0 until AVPlayer is actually playing.
+		nowPlayingInfo[MPNowPlayingInfoPropertyPlaybackRate] = 0
 		MPNowPlayingInfoCenter.default().nowPlayingInfo = nowPlayingInfo
 
 		// Set up remote transport controls only if they haven't been set up yet
@@ -636,6 +821,7 @@ class AudioPro: RCTEventEmitter {
 					headerFields[headerField] = headerValue
 				}
 			}
+			currentAudioHeaders = headerFields
 
 			// Create an AVAsset with the headers
 			let asset = AVURLAsset(url: url, options: ["AVURLAssetHTTPHeaderFieldsKey": headerFields])
@@ -643,6 +829,7 @@ class AudioPro: RCTEventEmitter {
 			self.currentAsset = asset
 		} else {
 			// No headers, use simple URL initialization
+			currentAudioHeaders = nil
 			let asset = AVURLAsset(url: url)
 			item = AVPlayerItem(asset: asset)
 			self.currentAsset = asset
@@ -698,21 +885,11 @@ class AudioPro: RCTEventEmitter {
 			NotificationCenter.default.removeObserver(self, name: .AVPlayerItemDidPlayToEndTime, object: oldItem)
 		}
 
-		// Add notification observer for track completion to the new item
-		NotificationCenter.default.addObserver(
-			self,
-			selector: #selector(playerItemDidPlayToEndTime(_:)),
-			name: .AVPlayerItemDidPlayToEndTime,
-			object: item
-		)
+		observePlaybackNotifications(for: item)
 
 		// Set up playback speed
 		if currentPlaybackSpeed != 1.0 {
 			player?.rate = currentPlaybackSpeed
-
-			var currentInfo = MPNowPlayingInfoCenter.default().nowPlayingInfo ?? [:]
-			currentInfo[MPNowPlayingInfoPropertyPlaybackRate] = Double(currentPlaybackSpeed)
-			MPNowPlayingInfoCenter.default().nowPlayingInfo = currentInfo
 		}
 
 		if autoPlay {
@@ -841,6 +1018,7 @@ class AudioPro: RCTEventEmitter {
 	@objc(pause)
 	func pause() {
 		alwaysLog("pause")
+		clearPlaybackStall(emitRecovered: false)
 		shouldBePlaying = false
 		player?.pause()
 		stopTimer()
@@ -880,23 +1058,29 @@ class AudioPro: RCTEventEmitter {
 		])
 
 		player?.play()
+		let isActuallyPlaying = player?.timeControlStatus == .playing
 
 		emitDiagnosticWithEnvelope(tag: "PLAYBACK_STATE_CHANGE", data: [
-			"state": STATE_PLAYING,
+			"state": isActuallyPlaying ? STATE_PLAYING : "BUFFERING",
 			"playWhenReady": true,
 			"reason": "USER_REQUEST",
 			"positionMs": info.position,
 			"durationMs": info.duration
 		])
 
-		// Ensure lock screen controls are properly updated
-		updateNowPlayingInfo(time: player?.currentTime().seconds ?? 0, rate: 1.0)
+		// CarPlay must reflect AVPlayer's actual transport state, not merely the
+		// user's intent to play. KVO updates the rate when playback really begins.
+		updateNowPlayingInfo(
+			time: player?.currentTime().seconds ?? 0,
+			rate: isActuallyPlaying ? currentPlaybackSpeed : 0
+		)
 	}
 
 	/// stop is meant to halt playback and update the state without destroying persistent info
 	/// such as artwork and remote control settings. This allows the lock screen/Control Center
 	/// to continue displaying the track details for a potential resume.
 	@objc func stop() {
+		clearPlaybackStall(emitRecovered: false)
 		// Reset error state when explicitly stopping
 		isInErrorState = false
 		// Reset last emitted state when stopping playback
@@ -960,6 +1144,7 @@ class AudioPro: RCTEventEmitter {
 	/// - Parameter clearTrack: Whether to clear the currentTrack (default: true)
 	@objc func cleanup(emitStateChange: Bool = true, clearTrack: Bool = true) {
 		log("Cleanup", "emitStateChange:", emitStateChange, "clearTrack:", clearTrack)
+		clearPlaybackStall(emitRecovered: false)
 
 		// Reset pending start time
 		pendingStartTimeMs = nil
@@ -991,6 +1176,9 @@ class AudioPro: RCTEventEmitter {
 
 		player?.pause()
 		player = nil
+		currentAsset = nil
+		currentAssetURL = nil
+		currentAudioHeaders = nil
 
 		stopTimer()
 
@@ -1018,7 +1206,7 @@ class AudioPro: RCTEventEmitter {
 	////////////////////////////////////////////////////////////
 
 	/// Common seek implementation used by all seek methods
-	private func performSeek(to position: Double, isAbsolute: Bool = true) {
+	private func performSeek(to position: Double, isAbsolute: Bool = true, triggerSource: String = "USER") {
 		guard let player = player else {
 			onError("Cannot seek: no track is playing")
 			return
@@ -1088,7 +1276,10 @@ class AudioPro: RCTEventEmitter {
 
 				if completed || isEffectivelyAtTarget {
 					self.updateNowPlayingInfoWithCurrentTime(validPosition)
-					self.completeSeekingAndSendSeekCompleteNoticeEvent(newPosition: targetPositionMs)
+					self.completeSeekingAndSendSeekCompleteNoticeEvent(
+						newPosition: targetPositionMs,
+						triggerSource: triggerSource
+					)
 
 					// Force update the now playing info to ensure controls work
 					if isAbsolute { // Only do this for absolute seeks to avoid redundant updates
@@ -1128,14 +1319,14 @@ class AudioPro: RCTEventEmitter {
 	}
 
 
-	private func completeSeekingAndSendSeekCompleteNoticeEvent(newPosition: Double) {
+	private func completeSeekingAndSendSeekCompleteNoticeEvent(newPosition: Double, triggerSource: String) {
 		if hasListeners {
 			let info = getPlaybackInfo()
 
 			let payload: [String: Any] = [
 				"position": info.position,
 				"duration": info.duration,
-				"triggeredBy": TRIGGER_SOURCE_USER
+				"triggeredBy": triggerSource
 			]
 			sendEvent(type: EVENT_TYPE_SEEK_COMPLETE, track: info.track, payload: payload)
 		}
@@ -1309,6 +1500,7 @@ class AudioPro: RCTEventEmitter {
 				stopTimer()
 			case .playing:
 				// Actually playing audio
+				clearPlaybackStall(emitRecovered: true)
 				sendPlayingStateEvent()
 				startProgressTimer()
 				// Reset retry counter on successful playback
@@ -1354,6 +1546,12 @@ class AudioPro: RCTEventEmitter {
 			log("Ignoring \(state) state after ERROR")
 			return
 		}
+
+		let nowPlayingRate: Float = state == STATE_PLAYING ? (player?.rate ?? currentPlaybackSpeed) : 0
+		updateNowPlayingInfo(
+			time: player?.currentTime().seconds ?? 0,
+			rate: nowPlayingRate
+		)
 
 		// Filter out duplicate state emissions
 		// This prevents rapid-fire transitions of the same state being emitted repeatedly
@@ -1468,16 +1666,90 @@ class AudioPro: RCTEventEmitter {
 		].contains(error.code)
 	}
 
+	private func recoverStalledPlayback(trigger: String) {
+		guard isPlaybackStallPending,
+			  shouldBePlaying,
+			  isNetworkAvailable,
+			  let player = player,
+			  let url = currentAssetURL else { return }
+
+		let retryDecision = PlaybackRecoveryPolicy.nextStallRetry(
+			currentAttempt: retryCount,
+			maxAttempts: AudioPro.configMaxRetries
+		)
+		switch retryDecision {
+		case .exhausted(let attempts):
+			emitDiagnosticWithEnvelope(tag: "PLAYBACK_STALL_RECOVERY_EXHAUSTED", data: [
+				"positionMs": stalledPositionMs,
+				"attempts": attempts,
+				"trigger": trigger
+			])
+			onError("Playback remained stalled after \(attempts) recovery attempts", code: 1001)
+			return
+		case .attempt(let attempt):
+			retryCount = attempt
+		}
+
+		let recoveryPositionMs = stalledPositionMs
+		let recoveryGeneration = playbackGeneration
+		clearPlaybackStall(emitRecovered: false)
+		isPlaybackStallRecoveryInFlight = true
+		stallRecoveryStartPositionMs = recoveryPositionMs
+
+		emitPlaybackStallRecoveryAttempt(
+			positionMs: recoveryPositionMs,
+			attempt: retryCount,
+			trigger: trigger
+		)
+
+		let asset: AVURLAsset
+		if let headers = currentAudioHeaders, !headers.isEmpty {
+			asset = AVURLAsset(url: url, options: ["AVURLAssetHTTPHeaderFieldsKey": headers])
+		} else {
+			asset = AVURLAsset(url: url)
+		}
+		currentAsset = asset
+
+		let oldItem = player.currentItem
+		if let oldItem = oldItem, isStatusObserverAdded {
+			oldItem.removeObserver(self, forKeyPath: "status")
+			isStatusObserverAdded = false
+		}
+		removePlaybackNotifications(for: oldItem)
+
+		let newItem = AVPlayerItem(asset: asset)
+		newItem.preferredForwardBufferDuration = AudioPro.configMaxBufferMs / 1000.0
+		newItem.addObserver(self, forKeyPath: "status", options: [.new], context: nil)
+		isStatusObserverAdded = true
+		observePlaybackNotifications(for: newItem)
+
+		// Replacing the asset is what forces a fresh HTTP request. The existing
+		// item may keep a half-open range request indefinitely after connectivity
+		// changes. The ready-state observer performs this pending seek.
+		pendingStartTimeMs = Double(recoveryPositionMs)
+		player.replaceCurrentItem(with: newItem)
+		hasTrackEnded = false
+
+		guard playbackGeneration == recoveryGeneration else { return }
+		player.play()
+		if currentPlaybackSpeed != 1.0 {
+			player.rate = currentPlaybackSpeed
+		}
+	}
+
 	private func retryWithCurrentAsset() {
-		guard let asset = currentAsset, let player = player else {
+		guard let asset = currentAsset,
+			  let url = currentAssetURL,
+			  let player = player else {
 			log("Cannot retry: no asset or player available")
 			return
 		}
 
 		retryCount += 1
+		let retryAttempt = retryCount
 
-		let delaySeconds = Double(retryCount) * AudioPro.configRetryBackoffMs / 1000.0
-		log("Retrying playback (attempt \(retryCount)/\(AudioPro.configMaxRetries)) after \(delaySeconds)s")
+		let delaySeconds = Double(retryAttempt) * AudioPro.configRetryBackoffMs / 1000.0
+		log("Retrying playback (attempt \(retryAttempt)/\(AudioPro.configMaxRetries)) after \(delaySeconds)s")
 
 		DispatchQueue.main.asyncAfter(deadline: .now() + delaySeconds) { [weak self] in
 			guard let self = self, let player = self.player else { return }
@@ -1486,6 +1758,14 @@ class AudioPro: RCTEventEmitter {
 			guard asset === self.currentAsset else {
 				self.log("Retry cancelled: asset changed (new play() call)")
 				return
+			}
+
+			if self.isPlaybackStallRecoveryInFlight {
+				self.emitPlaybackStallRecoveryAttempt(
+					positionMs: self.stallRecoveryStartPositionMs,
+					attempt: retryAttempt,
+					trigger: "TRANSIENT_ERROR_RETRY"
+				)
 			}
 
 			// Capture old item before replacement for scoped observer cleanup
@@ -1497,8 +1777,17 @@ class AudioPro: RCTEventEmitter {
 				self.isStatusObserverAdded = false
 			}
 
-			// Create fresh AVPlayerItem from same AVURLAsset (preserves custom headers)
-			let newItem = AVPlayerItem(asset: asset)
+			// A failed AVURLAsset may keep its failed resource-loader state even after
+			// connectivity returns. Recreate the asset as well as the item so every
+			// retry performs a genuinely fresh request while preserving headers.
+			let retryAsset: AVURLAsset
+			if let headers = self.currentAudioHeaders, !headers.isEmpty {
+				retryAsset = AVURLAsset(url: url, options: ["AVURLAssetHTTPHeaderFieldsKey": headers])
+			} else {
+				retryAsset = AVURLAsset(url: url)
+			}
+			self.currentAsset = retryAsset
+			let newItem = AVPlayerItem(asset: retryAsset)
 			newItem.preferredForwardBufferDuration = AudioPro.configMaxBufferMs / 1000.0
 
 			// Add KVO to new item
@@ -1508,16 +1797,8 @@ class AudioPro: RCTEventEmitter {
 			// Replace item - player stays alive
 			player.replaceCurrentItem(with: newItem)
 
-			// Re-add track completion observer for new item (scoped to old item, not nil)
-			if let oldItem = oldItem {
-				NotificationCenter.default.removeObserver(self, name: .AVPlayerItemDidPlayToEndTime, object: oldItem)
-			}
-			NotificationCenter.default.addObserver(
-				self,
-				selector: #selector(self.playerItemDidPlayToEndTime(_:)),
-				name: .AVPlayerItemDidPlayToEndTime,
-				object: newItem
-			)
+			self.removePlaybackNotifications(for: oldItem)
+			self.observePlaybackNotifications(for: newItem)
 
 			if self.shouldBePlaying {
 				player.play()
@@ -1709,17 +1990,13 @@ class AudioPro: RCTEventEmitter {
 			guard let self = self, let positionEvent = event as? MPChangePlaybackPositionCommandEvent else {
 				return .commandFailed
 			}
-			self.seekTo(position: positionEvent.positionTime * 1000)
-			if self.hasListeners {
-				let positionMs = positionEvent.positionTime * 1000
-				let info = self.getPlaybackInfo()
-				let payload: [String: Any] = [
-					"position": Int(positionMs),
-					"duration": info.duration,
-					"triggeredBy": self.TRIGGER_SOURCE_SYSTEM
-				]
-				self.sendEvent(type: self.EVENT_TYPE_SEEK_COMPLETE, track: self.currentTrack, payload: payload)
-			}
+			// Do not acknowledge the requested position until AVPlayer's completion
+			// callback confirms that the native playhead actually moved.
+			self.performSeek(
+				to: positionEvent.positionTime * 1000,
+				isAbsolute: true,
+				triggerSource: self.TRIGGER_SOURCE_SYSTEM
+			)
 			return .success
 		}
 
