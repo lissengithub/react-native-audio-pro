@@ -10,6 +10,7 @@
 	"scripts": {
 		"example": "yarn workspace react-native-audio-pro-example",
 		"test": "jest",
+		"test:native:ios": "swift test",
 		"check": "yarn lint && yarn typecheck && yarn prepare && yarn test",
 		"typecheck": "tsc",
 		"lint": "eslint \"**/*.{js,ts,tsx}\"",

@@ -253,8 +253,25 @@ class AudioPro: RCTEventEmitter {
 
 			if self.isNetworkAvailable {
 				self.schedulePlaybackStallCircuitBreaker()
+			} else {
+				self.emitPlaybackStallWaitingForNetwork()
 			}
 		}
+	}
+
+	private func emitPlaybackStallWaitingForNetwork() {
+		emitDiagnosticWithEnvelope(tag: "PLAYBACK_STALL_WAITING_FOR_NETWORK", data: [
+			"positionMs": stalledPositionMs,
+			"recoveryAttempt": retryCount
+		])
+	}
+
+	private func emitPlaybackStallRecoveryAttempt(positionMs: Int, attempt: Int, trigger: String) {
+		emitDiagnosticWithEnvelope(tag: "PLAYBACK_STALL_RECOVERY_ATTEMPT", data: [
+			"positionMs": positionMs,
+			"attempt": attempt,
+			"trigger": trigger
+		])
 	}
 
 	private func handleNetworkPathChange(isAvailable: Bool) {
@@ -265,9 +282,7 @@ class AudioPro: RCTEventEmitter {
 		if !isAvailable {
 			stallRecoveryWorkItem?.cancel()
 			stallRecoveryWorkItem = nil
-			emitDiagnosticWithEnvelope(tag: "PLAYBACK_STALL_WAITING_FOR_NETWORK", data: [
-				"positionMs": stalledPositionMs
-			])
+			emitPlaybackStallWaitingForNetwork()
 			return
 		}
 
@@ -444,15 +459,23 @@ class AudioPro: RCTEventEmitter {
 					try AVAudioSession.sharedInstance().setActive(true, options: .notifyOthersOnDeactivation)
 
 					// Resume playback — timeControlStatus observer will emit
-				// PLAYING once audio is actually flowing, or LOADING if rebuffering
+					// PLAYING once audio is actually flowing, or LOADING if rebuffering.
 					player?.play()
+					let presentation = PlaybackRecoveryPolicy.resumePresentation(
+						isActuallyPlaying: player?.timeControlStatus == .playing,
+						playbackSpeed: currentPlaybackSpeed
+					)
 
-					// Update now playing info
-					updateNowPlayingInfo(time: player?.currentTime().seconds ?? 0, rate: 1.0)
+					// CarPlay must reflect actual transport state. KVO updates this
+					// again when playback starts flowing after any rebuffering.
+					updateNowPlayingInfo(
+						time: player?.currentTime().seconds ?? 0,
+						rate: presentation.nowPlayingRate
+					)
 
 					let info = getPlaybackInfo()
 					emitDiagnosticWithEnvelope(tag: "PLAYBACK_STATE_CHANGE", data: [
-						"state": STATE_PLAYING,
+						"state": presentation.isActuallyPlaying ? STATE_PLAYING : "BUFFERING",
 						"playWhenReady": true,
 						"reason": "INTERRUPTION",
 						"positionMs": info.position,
@@ -1650,29 +1673,34 @@ class AudioPro: RCTEventEmitter {
 			  let player = player,
 			  let url = currentAssetURL else { return }
 
-		guard retryCount < AudioPro.configMaxRetries else {
+		let retryDecision = PlaybackRecoveryPolicy.nextStallRetry(
+			currentAttempt: retryCount,
+			maxAttempts: AudioPro.configMaxRetries
+		)
+		switch retryDecision {
+		case .exhausted(let attempts):
 			emitDiagnosticWithEnvelope(tag: "PLAYBACK_STALL_RECOVERY_EXHAUSTED", data: [
 				"positionMs": stalledPositionMs,
-				"attempts": retryCount,
+				"attempts": attempts,
 				"trigger": trigger
 			])
-			emitPlaybackError("Playback remained stalled after \(retryCount) recovery attempts", code: 1001)
-			clearPlaybackStall(emitRecovered: false)
+			onError("Playback remained stalled after \(attempts) recovery attempts", code: 1001)
 			return
+		case .attempt(let attempt):
+			retryCount = attempt
 		}
 
 		let recoveryPositionMs = stalledPositionMs
 		let recoveryGeneration = playbackGeneration
-		retryCount += 1
 		clearPlaybackStall(emitRecovered: false)
 		isPlaybackStallRecoveryInFlight = true
 		stallRecoveryStartPositionMs = recoveryPositionMs
 
-		emitDiagnosticWithEnvelope(tag: "PLAYBACK_STALL_RECOVERY_ATTEMPT", data: [
-			"positionMs": recoveryPositionMs,
-			"attempt": retryCount,
-			"trigger": trigger
-		])
+		emitPlaybackStallRecoveryAttempt(
+			positionMs: recoveryPositionMs,
+			attempt: retryCount,
+			trigger: trigger
+		)
 
 		let asset: AVURLAsset
 		if let headers = currentAudioHeaders, !headers.isEmpty {
@@ -1718,9 +1746,10 @@ class AudioPro: RCTEventEmitter {
 		}
 
 		retryCount += 1
+		let retryAttempt = retryCount
 
-		let delaySeconds = Double(retryCount) * AudioPro.configRetryBackoffMs / 1000.0
-		log("Retrying playback (attempt \(retryCount)/\(AudioPro.configMaxRetries)) after \(delaySeconds)s")
+		let delaySeconds = Double(retryAttempt) * AudioPro.configRetryBackoffMs / 1000.0
+		log("Retrying playback (attempt \(retryAttempt)/\(AudioPro.configMaxRetries)) after \(delaySeconds)s")
 
 		DispatchQueue.main.asyncAfter(deadline: .now() + delaySeconds) { [weak self] in
 			guard let self = self, let player = self.player else { return }
@@ -1729,6 +1758,14 @@ class AudioPro: RCTEventEmitter {
 			guard asset === self.currentAsset else {
 				self.log("Retry cancelled: asset changed (new play() call)")
 				return
+			}
+
+			if self.isPlaybackStallRecoveryInFlight {
+				self.emitPlaybackStallRecoveryAttempt(
+					positionMs: self.stallRecoveryStartPositionMs,
+					attempt: retryAttempt,
+					trigger: "TRANSIENT_ERROR_RETRY"
+				)
 			}
 
 			// Capture old item before replacement for scoped observer cleanup
